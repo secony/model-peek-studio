@@ -25,8 +25,8 @@ export function EmptyGuide() {
           <span className="text-xs text-muted-foreground">Arquivos ficam no seu navegador.</span>
         </div>
         <p className="mt-4 border-t border-border pt-3 text-xs text-muted-foreground">
-          Prefira <span className="font-mono text-foreground">.glb</span>: um .gltf com .bin ou texturas
-          separados não pode ser lido por arquivo único.
+          Prefira <span className="font-mono text-foreground">.glb</span>: um .gltf com .bin ou
+          texturas separados não pode ser lido por arquivo único.
         </p>
       </div>
     </div>

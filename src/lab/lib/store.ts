@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { Object3D } from "three";
 import type { ModelFormat } from "./loaders";
-import { disposeObject } from "./scene-utils";
+import { disposeObject, disposeObjects } from "./scene-utils";
 
 export interface LoadedModel {
   id: string;
@@ -14,8 +14,20 @@ export interface LoadedModel {
 
 export type Projection = "perspective" | "orthographic";
 
+export interface ImportOperation {
+  id: string;
+  generation: number;
+  controller: AbortController;
+}
+
+export type ImportOperationToken = Pick<ImportOperation, "id" | "generation">;
+
+let nextImportOperationId = 0;
+
 interface LabState {
   models: LoadedModel[];
+  activeImports: Record<string, ImportOperation>;
+  sceneGeneration: number;
   selected: Object3D | null;
   /** Bumped whenever an Object3D is mutated in place so panels re-read it. */
   revision: number;
@@ -32,13 +44,17 @@ interface LabState {
   select: (o: Object3D | null) => void;
   touch: () => void;
   fit: () => void;
-  setLoading: (v: boolean) => void;
+  beginImport: (controller: AbortController) => ImportOperationToken;
+  addImportedModel: (operation: ImportOperationToken, model: LoadedModel) => boolean;
+  finishImport: (id: string) => void;
   toggle: (k: "showGrid" | "showAxes" | "wireframe") => void;
   setProjection: (p: Projection) => void;
 }
 
 export const useLab = create<LabState>((set, get) => ({
   models: [],
+  activeImports: {},
+  sceneGeneration: 0,
   selected: null,
   revision: 0,
   fitToken: 0,
@@ -56,20 +72,60 @@ export const useLab = create<LabState>((set, get) => ({
     m.root.traverse((o) => {
       if (o === get().selected) selectedInside = true;
     });
-    disposeObject(m.root);
+    disposeObject(
+      m.root,
+      get()
+        .models.filter((x) => x.id !== id)
+        .map((x) => x.root),
+    );
     set((s) => ({
       models: s.models.filter((x) => x.id !== id),
       selected: selectedInside ? null : s.selected,
     }));
   },
   clearScene: () => {
-    get().models.forEach((m) => disposeObject(m.root));
+    const models = get().models;
+    const activeImports = Object.values(get().activeImports);
+    set((s) => ({ sceneGeneration: s.sceneGeneration + 1 }));
+    activeImports.forEach((operation) => operation.controller.abort());
+    disposeObjects(models.map((model) => model.root));
     set((s) => ({ models: [], selected: null, fitToken: s.fitToken + 1 }));
   },
   select: (o) => set({ selected: o }),
   touch: () => set((s) => ({ revision: s.revision + 1 })),
   fit: () => set((s) => ({ fitToken: s.fitToken + 1 })),
-  setLoading: (v) => set({ loading: v }),
+  beginImport: (controller) => {
+    const operation: ImportOperation = {
+      id: `import-${++nextImportOperationId}`,
+      generation: get().sceneGeneration,
+      controller,
+    };
+    set((s) => ({
+      activeImports: { ...s.activeImports, [operation.id]: operation },
+      loading: true,
+    }));
+    return { id: operation.id, generation: operation.generation };
+  },
+  addImportedModel: (operation, model) => {
+    const active = get().activeImports[operation.id];
+    if (
+      !active ||
+      active.generation !== operation.generation ||
+      get().sceneGeneration !== operation.generation ||
+      active.controller.signal.aborted
+    ) {
+      return false;
+    }
+    get().addModel(model);
+    return true;
+  },
+  finishImport: (id) =>
+    set((s) => {
+      if (!s.activeImports[id]) return s;
+      const activeImports = { ...s.activeImports };
+      delete activeImports[id];
+      return { activeImports, loading: Object.keys(activeImports).length > 0 };
+    }),
   toggle: (k) => set((s) => ({ [k]: !s[k] }) as Partial<LabState>),
   setProjection: (p) => set((s) => ({ projection: p, fitToken: s.fitToken + 1 })),
 }));

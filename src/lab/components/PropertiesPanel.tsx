@@ -9,7 +9,15 @@ type Vec = "position" | "rotation" | "scale";
 const AXES = ["x", "y", "z"] as const;
 const AXIS_CLASS = { x: "text-axis-x", y: "text-axis-y", z: "text-axis-z" };
 
-function NumberField({ value, onCommit, axis }: { value: number; onCommit: (v: number) => void; axis: (typeof AXES)[number] }) {
+function NumberField({
+  value,
+  onCommit,
+  axis,
+}: {
+  value: number;
+  onCommit: (v: number) => void;
+  axis: (typeof AXES)[number];
+}) {
   const [text, setText] = useState(formatNumber(value, 3));
   useEffect(() => setText(formatNumber(value, 3)), [value]);
   const commit = () => {
@@ -19,7 +27,11 @@ function NumberField({ value, onCommit, axis }: { value: number; onCommit: (v: n
   };
   return (
     <div className="relative">
-      <span className={`pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[10px] uppercase ${AXIS_CLASS[axis]}`}>{axis}</span>
+      <span
+        className={`pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[10px] uppercase ${AXIS_CLASS[axis]}`}
+      >
+        {axis}
+      </span>
       <Input
         className="h-7 pl-5 pr-1 font-mono text-xs"
         value={text}
@@ -57,7 +69,9 @@ function VectorRow({ obj, prop, label }: { obj: Object3D; prop: Vec; label: stri
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-3 border-b border-border p-3">
-      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{title}</h3>
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+        {title}
+      </h3>
       {children}
     </section>
   );
@@ -73,7 +87,9 @@ export function PropertiesPanel() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
         <MousePointerClick className="size-6 text-muted-foreground" />
-        <p className="text-xs text-muted-foreground">Selecione um objeto na viewport ou na hierarquia para ver e editar suas propriedades.</p>
+        <p className="text-xs text-muted-foreground">
+          Selecione um objeto na viewport ou na hierarquia para ver e editar suas propriedades.
+        </p>
       </div>
     );
 
@@ -120,7 +136,8 @@ export function PropertiesPanel() {
           <p className="text-xs text-muted-foreground">Sem geometria.</p>
         )}
         <p className="text-[11px] text-muted-foreground">
-          {stats.meshes} malha(s) · {stats.triangles.toLocaleString("pt-BR")} triângulos · unidades da cena
+          {stats.meshes} malha(s) · {stats.triangles.toLocaleString("pt-BR")} triângulos · unidades
+          da cena
         </p>
       </Section>
       {model && (

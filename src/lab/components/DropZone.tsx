@@ -26,7 +26,9 @@ export function DropZone({ children }: { children: ReactNode }) {
       {over && (
         <div className="pointer-events-none absolute inset-3 z-20 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-primary bg-background/70 backdrop-blur-sm">
           <FileUp className="size-10 text-primary" />
-          <p className="font-mono text-sm text-foreground">Solte para importar .glb · .gltf · .stl</p>
+          <p className="font-mono text-sm text-foreground">
+            Solte para importar .glb · .gltf · .stl
+          </p>
         </div>
       )}
     </div>

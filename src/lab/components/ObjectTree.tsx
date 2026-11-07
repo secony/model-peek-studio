@@ -4,7 +4,15 @@ import type { Mesh, Object3D } from "three";
 import { cn } from "@/lib/utils";
 import { useLab } from "../lib/store";
 
-function TreeNode({ obj, depth, onRemove }: { obj: Object3D; depth: number; onRemove?: () => void }) {
+function TreeNode({
+  obj,
+  depth,
+  onRemove,
+}: {
+  obj: Object3D;
+  depth: number;
+  onRemove?: () => void;
+}) {
   const [open, setOpen] = useState(depth === 0);
   const selected = useLab((s) => s.selected);
   const select = useLab((s) => s.select);
@@ -18,7 +26,9 @@ function TreeNode({ obj, depth, onRemove }: { obj: Object3D; depth: number; onRe
       <div
         className={cn(
           "group flex h-7 cursor-pointer items-center gap-1 rounded pr-1 text-xs",
-          selected === obj ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+          selected === obj
+            ? "bg-primary/15 text-foreground"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
         )}
         style={{ paddingLeft: depth * 12 + 4 }}
         onClick={() => select(obj)}

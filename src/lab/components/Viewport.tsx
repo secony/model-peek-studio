@@ -8,7 +8,13 @@ import {
   OrthographicCamera,
   PerspectiveCamera,
 } from "@react-three/drei";
-import { BoxHelper, Color, OrthographicCamera as OrthoCam, PerspectiveCamera as PerspCam, Vector3 } from "three";
+import {
+  BoxHelper,
+  Color,
+  OrthographicCamera as OrthoCam,
+  PerspectiveCamera as PerspCam,
+  Vector3,
+} from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { useLab } from "../lib/store";
 import { getBounds, setWireframe } from "../lib/scene-utils";
@@ -20,7 +26,14 @@ function Models() {
   const models = useLab((s) => s.models);
   const wireframe = useLab((s) => s.wireframe);
   const select = useLab((s) => s.select);
-  useEffect(() => setWireframe(models.map((m) => m.root), wireframe), [models, wireframe]);
+  useEffect(
+    () =>
+      setWireframe(
+        models.map((m) => m.root),
+        wireframe,
+      ),
+    [models, wireframe],
+  );
   return (
     <>
       {models.map((m) => (
@@ -105,10 +118,20 @@ export function Viewport() {
       <OrbitControls makeDefault enableDamping dampingFactor={0.12} />
       <CameraRig key={projection} />
       <hemisphereLight args={["#dfe6f0", "#2a2c30", 0.6]} />
-      <directionalLight position={[8, 12, 6]} intensity={1.6} castShadow shadow-mapSize={[2048, 2048]} />
+      <directionalLight
+        position={[8, 12, 6]}
+        intensity={1.6}
+        castShadow
+        shadow-mapSize={[2048, 2048]}
+      />
       <Environment resolution={128}>
         <Lightformer intensity={1.5} position={[0, 5, 0]} scale={[10, 10, 1]} />
-        <Lightformer intensity={0.8} position={[-5, 1, -1]} rotation-y={Math.PI / 2} scale={[20, 1, 1]} />
+        <Lightformer
+          intensity={0.8}
+          position={[-5, 1, -1]}
+          rotation-y={Math.PI / 2}
+          scale={[20, 1, 1]}
+        />
       </Environment>
       {showGrid && (
         <Grid

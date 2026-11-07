@@ -4,11 +4,28 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useLab } from "../lib/store";
 import { ImportButton } from "./ImportButton";
 
-function IconAction({ label, onClick, disabled, children }: { label: string; onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
+function IconAction({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Button size="icon" variant="ghost" className="size-8" onClick={onClick} disabled={disabled} aria-label={label}>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="size-8"
+          onClick={onClick}
+          disabled={disabled}
+          aria-label={label}
+        >
           {children}
         </Button>
       </TooltipTrigger>
@@ -23,7 +40,9 @@ export function TopBar() {
   return (
     <header className="flex h-12 items-center gap-3 border-b border-border bg-panel px-3">
       <div className="flex items-center gap-2">
-        <div className="grid size-6 place-items-center rounded-sm border border-primary/60 font-mono text-[10px] font-bold text-primary">3D</div>
+        <div className="grid size-6 place-items-center rounded-sm border border-primary/60 font-mono text-[10px] font-bold text-primary">
+          3D
+        </div>
         <span className="text-sm font-semibold tracking-tight">3D Lab</span>
       </div>
       <div className="mx-2 h-5 w-px bg-border" />

@@ -1,14 +1,97 @@
-import { Box3, Mesh, Vector3, type Material, type Object3D } from "three";
+import {
+  Box3,
+  Mesh,
+  Vector3,
+  type BufferGeometry,
+  type Material,
+  type Object3D,
+  type Texture,
+} from "three";
 
-export function disposeObject(root: Object3D) {
-  root.removeFromParent();
-  root.traverse((o) => {
-    const mesh = o as Mesh;
-    if (!mesh.isMesh) return;
-    mesh.geometry?.dispose();
-    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    mats.forEach((m: Material | undefined) => m?.dispose());
+interface DisposableResources {
+  geometries: Set<BufferGeometry>;
+  materials: Set<Material>;
+  textures: Set<Texture>;
+}
+
+function collectMaterialTextures(value: unknown, textures: Set<Texture>, seen: WeakSet<object>) {
+  if (!value || typeof value !== "object") return;
+  const object = value as Record<string, unknown>;
+  if (object["isTexture"] === true) {
+    textures.add(value as Texture);
+    return;
+  }
+  if (seen.has(object)) return;
+  seen.add(object);
+
+  // Material properties and shader uniforms git diff -- src/lab/lib/store.test.tsmay contain textures in nested objects or arrays.
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectMaterialTextures(item, textures, seen));
+  } else if (
+    Object.getPrototypeOf(value) === Object.prototype ||
+    Object.getPrototypeOf(value) === null
+  ) {
+    Object.values(object).forEach((item) => collectMaterialTextures(item, textures, seen));
+  }
+}
+
+function collectResources(roots: Object3D[]): DisposableResources {
+  const resources: DisposableResources = {
+    geometries: new Set(),
+    materials: new Set(),
+    textures: new Set(),
+  };
+
+  roots.forEach((root) =>
+    root.traverse((object) => {
+      const candidate = object as Object3D & {
+        geometry?: BufferGeometry;
+        material?: Material | Material[];
+      };
+      if (candidate.geometry?.isBufferGeometry) resources.geometries.add(candidate.geometry);
+      if (!candidate.material) return;
+
+      const materials = Array.isArray(candidate.material)
+        ? candidate.material
+        : [candidate.material];
+      materials.forEach((material) => {
+        resources.materials.add(material);
+        const seen = new WeakSet<object>([material]);
+        Object.values(material).forEach((value) =>
+          collectMaterialTextures(value, resources.textures, seen),
+        );
+      });
+    }),
+  );
+
+  return resources;
+}
+
+function disposeResources(resources: DisposableResources, retained?: DisposableResources) {
+  resources.geometries.forEach((geometry) => {
+    if (!retained?.geometries.has(geometry)) geometry.dispose();
   });
+  resources.materials.forEach((material) => {
+    if (!retained?.materials.has(material)) material.dispose();
+  });
+  resources.textures.forEach((texture) => {
+    if (!retained?.textures.has(texture)) texture.dispose();
+  });
+}
+
+/** Removes multiple subtrees and disposes their shared resources once. */
+export function disposeObjects(roots: Object3D[]) {
+  const resources = collectResources(roots);
+  roots.forEach((root) => root.removeFromParent());
+  disposeResources(resources);
+}
+
+/** Removes a subtree and disposes its resources unless they are still used by retained roots. */
+export function disposeObject(root: Object3D, retainedRoots: Object3D[] = []) {
+  const resources = collectResources([root]);
+  const retained = collectResources(retainedRoots);
+  root.removeFromParent();
+  disposeResources(resources, retained);
 }
 
 export function getBounds(objects: Object3D[]): Box3 | null {
@@ -33,7 +116,7 @@ export function countStats(o: Object3D) {
     if (!m.isMesh || !m.geometry) return;
     meshes++;
     const g = m.geometry;
-    triangles += (g.index ? g.index.count : (g.attributes['position']?.count ?? 0)) / 3;
+    triangles += (g.index ? g.index.count : (g.attributes["position"]?.count ?? 0)) / 3;
   });
   return { meshes, triangles: Math.round(triangles) };
 }

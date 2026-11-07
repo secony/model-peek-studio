@@ -14,14 +14,20 @@ export function StatusBar() {
         <span className="size-1.5 rounded-full bg-primary" /> Pronto
       </span>
       <span>{models.length} modelo(s)</span>
-      {last && <span className="truncate">{last.fileName} · {last.format.toUpperCase()}</span>}
+      {last && (
+        <span className="truncate">
+          {last.fileName} · {last.format.toUpperCase()}
+        </span>
+      )}
       {size && (
         <span>
           Cena {formatNumber(size.x)} × {formatNumber(size.y)} × {formatNumber(size.z)}
         </span>
       )}
       {selected && <span className="truncate">Sel: {selected.name || selected.type}</span>}
-      <span className="ml-auto hidden md:inline">Orbitar: botão esq. · Mover: botão dir. · Zoom: roda</span>
+      <span className="ml-auto hidden md:inline">
+        Orbitar: botão esq. · Mover: botão dir. · Zoom: roda
+      </span>
       <span className="uppercase">{projection === "perspective" ? "Persp" : "Orto"}</span>
     </footer>
   );
