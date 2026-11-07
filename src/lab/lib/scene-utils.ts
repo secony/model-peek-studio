@@ -24,7 +24,7 @@ function collectMaterialTextures(value: unknown, textures: Set<Texture>, seen: W
   if (seen.has(object)) return;
   seen.add(object);
 
-  // Material properties and shader uniforms git diff -- src/lab/lib/store.test.tsmay contain textures in nested objects or arrays.
+  // Material properties and shader uniforms may contain textures in nested objects or arrays.
   if (Array.isArray(value)) {
     value.forEach((item) => collectMaterialTextures(item, textures, seen));
   } else if (
