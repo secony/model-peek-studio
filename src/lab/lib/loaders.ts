@@ -35,7 +35,7 @@ function assertSelfContainedGltf(text: string) {
 
 function parseStl(buffer: ArrayBuffer): Object3D {
   const geometry = new STLLoader().parse(buffer);
-  if (!geometry.attributes.position?.count) throw new ModelLoadError("O STL não contém geometria.");
+  if (!geometry.attributes['position']?.count) throw new ModelLoadError("O STL não contém geometria.");
   geometry.computeVertexNormals();
   const mesh = new Mesh(
     geometry,

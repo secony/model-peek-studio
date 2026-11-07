@@ -60,9 +60,9 @@ function SelectionHighlight() {
 /** Frames all loaded models whenever fitToken changes. */
 function CameraRig() {
   const fitToken = useLab((s) => s.fitToken);
-  const { camera, controls, size } = useThree() as ReturnType<typeof useThree> & {
-    controls: OrbitControlsImpl | null;
-  };
+  const camera = useThree((s) => s.camera);
+  const size = useThree((s) => s.size);
+  const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
   useEffect(() => {
     const models = useLab.getState().models;
     const box = getBounds(models.map((m) => m.root));

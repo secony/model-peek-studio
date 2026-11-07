@@ -33,7 +33,7 @@ export function countStats(o: Object3D) {
     if (!m.isMesh || !m.geometry) return;
     meshes++;
     const g = m.geometry;
-    triangles += (g.index ? g.index.count : (g.attributes.position?.count ?? 0)) / 3;
+    triangles += (g.index ? g.index.count : (g.attributes['position']?.count ?? 0)) / 3;
   });
   return { meshes, triangles: Math.round(triangles) };
 }
