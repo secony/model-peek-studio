@@ -70,7 +70,7 @@ function CameraRig() {
     const radius = box ? Math.max(box.getSize(new Vector3()).length() / 2, 0.01) : 5;
     if ((camera as PerspCam).isPerspectiveCamera) {
       const fov = ((camera as PerspCam).fov * Math.PI) / 180;
-      const dist = (radius / Math.sin(fov / 2)) * 1.1;
+      const dist = (radius / Math.sin(fov / 2)) * 1.6;
       camera.position.copy(target).addScaledVector(DEFAULT_DIR, dist);
       camera.near = dist / 1000;
       camera.far = dist * 100;
