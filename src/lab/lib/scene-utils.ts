@@ -1,6 +1,8 @@
 import {
   Box3,
   Mesh,
+  SkinnedMesh,
+  Skeleton,
   Vector3,
   type BufferGeometry,
   type Material,
@@ -11,6 +13,7 @@ import {
 interface DisposableResources {
   geometries: Set<BufferGeometry>;
   materials: Set<Material>;
+  skeletons: Set<Skeleton>;
   textures: Set<Texture>;
 }
 
@@ -39,6 +42,7 @@ function collectResources(roots: Object3D[]): DisposableResources {
   const resources: DisposableResources = {
     geometries: new Set(),
     materials: new Set(),
+    skeletons: new Set(),
     textures: new Set(),
   };
 
@@ -47,8 +51,12 @@ function collectResources(roots: Object3D[]): DisposableResources {
       const candidate = object as Object3D & {
         geometry?: BufferGeometry;
         material?: Material | Material[];
+        skeleton?: Skeleton;
       };
       if (candidate.geometry?.isBufferGeometry) resources.geometries.add(candidate.geometry);
+      if ((object as SkinnedMesh).isSkinnedMesh && candidate.skeleton) {
+        resources.skeletons.add(candidate.skeleton);
+      }
       if (!candidate.material) return;
 
       const materials = Array.isArray(candidate.material)
@@ -74,16 +82,20 @@ function disposeResources(resources: DisposableResources, retained?: DisposableR
   resources.materials.forEach((material) => {
     if (!retained?.materials.has(material)) material.dispose();
   });
+  resources.skeletons.forEach((skeleton) => {
+    if (!retained?.skeletons.has(skeleton)) skeleton.dispose();
+  });
   resources.textures.forEach((texture) => {
     if (!retained?.textures.has(texture)) texture.dispose();
   });
 }
 
 /** Removes multiple subtrees and disposes their shared resources once. */
-export function disposeObjects(roots: Object3D[]) {
+export function disposeObjects(roots: Object3D[], retainedRoots: Object3D[] = []) {
   const resources = collectResources(roots);
+  const retained = collectResources(retainedRoots);
   roots.forEach((root) => root.removeFromParent());
-  disposeResources(resources);
+  disposeResources(resources, retained);
 }
 
 /** Removes a subtree and disposes its resources unless they are still used by retained roots. */
@@ -101,6 +113,15 @@ export function getBounds(objects: Object3D[]): Box3 | null {
     box.expandByObject(o);
   });
   return box.isEmpty() ? null : box;
+}
+
+/** Returns false when the object or any ancestor is hidden in the scene graph. */
+export function isEffectivelyVisible(object: Object3D | null) {
+  if (!object) return false;
+  for (let current: Object3D | null = object; current; current = current.parent) {
+    if (!current.visible) return false;
+  }
+  return true;
 }
 
 export function getSize(o: Object3D): Vector3 | null {

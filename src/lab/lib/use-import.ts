@@ -46,8 +46,7 @@ export function useImportFiles() {
             });
 
             if (!added) {
-              const retainedRoots = useLab.getState().models.map((model) => model.root);
-              disposeObject(root, retainedRoots);
+              disposeObject(root, [useLab.getState().sceneRoot]);
               continue;
             }
 

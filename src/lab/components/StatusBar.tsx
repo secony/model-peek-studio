@@ -3,9 +3,9 @@ import { formatNumber, getBounds } from "../lib/scene-utils";
 import { Vector3 } from "three";
 
 export function StatusBar() {
-  const { models, projection, selected } = useLab();
+  const { models, projection, selected, sceneRoot } = useLab();
   useLab((s) => s.revision);
-  const box = getBounds(models.map((m) => m.root));
+  const box = getBounds([sceneRoot]);
   const size = box?.getSize(new Vector3());
   const last = models[models.length - 1];
   return (

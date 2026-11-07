@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { MousePointerClick } from "lucide-react";
 import { MathUtils, type Object3D } from "three";
 import { Input } from "@/components/ui/input";
-import { useLab } from "../lib/store";
+import { getModelOwnerId, useLab } from "../lib/store";
 import { countStats, formatBytes, formatNumber, getSize } from "../lib/scene-utils";
 
 type Vec = "position" | "rotation" | "scale";
@@ -93,11 +93,13 @@ export function PropertiesPanel() {
       </div>
     );
 
-  const model = models.find((m) => {
-    let inside = false;
-    m.root.traverse((o) => (inside ||= o === selected));
-    return inside;
-  });
+  const model =
+    models.find((candidate) => candidate.id === getModelOwnerId(selected)) ??
+    models.find((m) => {
+      let inside = false;
+      m.root.traverse((o) => (inside ||= o === selected));
+      return inside;
+    });
   const size = getSize(selected);
   const stats = countStats(selected);
 

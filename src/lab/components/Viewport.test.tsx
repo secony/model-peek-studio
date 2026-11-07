@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Group } from "three";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useLab } from "../lib/store";
@@ -9,10 +9,12 @@ vi.mock("@react-three/drei", () => ({
   TransformControls: ({
     object,
     mode,
+    onMouseDown,
     onMouseUp,
   }: {
     object: { uuid: string; position: { x: number } };
     mode: string;
+    onMouseDown?: () => void;
     onMouseUp?: () => void;
   }) => (
     <button
@@ -20,6 +22,7 @@ vi.mock("@react-three/drei", () => ({
       data-object={object.uuid}
       data-testid="transform-control"
       onClick={() => {
+        onMouseDown?.();
         object.position.x += 1;
         onMouseUp?.();
       }}
@@ -29,9 +32,24 @@ vi.mock("@react-three/drei", () => ({
   ),
 }));
 
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+
 function ToolbarHarness() {
   const [mode, setMode] = useState<TransformMode>("translate");
-  return <TransformToolbar mode={mode} onModeChange={setMode} />;
+  const [freeMoveEnabled, setFreeMoveEnabled] = useState(false);
+  return (
+    <TransformToolbar
+      mode={mode}
+      onModeChange={setMode}
+      freeMoveEnabled={freeMoveEnabled}
+      onToggleFreeMove={() => setFreeMoveEnabled((enabled) => !enabled)}
+    />
+  );
+}
+
+function TransformHarness({ mode }: { mode: TransformMode }) {
+  const transformDraggingRef = useRef(false);
+  return <SelectionTransform mode={mode} transformDraggingRef={transformDraggingRef} />;
 }
 
 describe("viewport transform tools", () => {
@@ -47,9 +65,11 @@ describe("viewport transform tools", () => {
     const translate = screen.getByRole("button", { name: "Mover" });
     const rotate = screen.getByRole("button", { name: "Rotacionar" });
     const scale = screen.getByRole("button", { name: "Escalar" });
+    const freeMove = screen.getByRole("button", { name: "Movimentação livre" });
     expect(translate).toBeDisabled();
     expect(rotate).toBeDisabled();
     expect(scale).toBeDisabled();
+    expect(freeMove).toBeDisabled();
 
     act(() => useLab.getState().select(new Group()));
     expect(translate).toBeEnabled();
@@ -58,6 +78,19 @@ describe("viewport transform tools", () => {
     expect(translate).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(scale);
     expect(scale).toHaveAttribute("aria-pressed", "true");
+
+    const parent = new Group();
+    const selected = new Group();
+    parent.add(selected);
+    act(() => useLab.getState().select(selected));
+    const duplicate = screen.getByRole("button", { name: "Duplicar objeto selecionado" });
+    expect(duplicate).toBeEnabled();
+    fireEvent.click(duplicate);
+    expect(parent.children).toHaveLength(2);
+    expect(useLab.getState().selected).toBe(parent.children[1]);
+    expect(freeMove).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(freeMove);
+    expect(freeMove).toHaveAttribute("aria-pressed", "true");
   });
 
   it("binds the gizmo to the selected child and touches the store on mouse up", () => {
@@ -67,7 +100,7 @@ describe("viewport transform tools", () => {
     parent.add(child);
     act(() => useLab.getState().select(child));
 
-    const { rerender } = render(<SelectionTransform mode="rotate" />);
+    const { rerender } = render(<TransformHarness mode="rotate" />);
     const control = screen.getByTestId("transform-control");
     expect(control).toHaveAttribute("data-object", child.uuid);
     expect(control).toHaveAttribute("data-mode", "rotate");
@@ -80,7 +113,7 @@ describe("viewport transform tools", () => {
 
     const nextSelection = new Group();
     act(() => useLab.getState().select(nextSelection));
-    rerender(<SelectionTransform mode="scale" />);
+    rerender(<TransformHarness mode="scale" />);
     expect(screen.getByTestId("transform-control")).toHaveAttribute(
       "data-object",
       nextSelection.uuid,
@@ -106,7 +139,7 @@ describe("viewport transform tools", () => {
       useLab.getState().select(child);
     });
 
-    const { rerender } = render(<SelectionTransform mode="translate" />);
+    const { rerender } = render(<TransformHarness mode="translate" />);
     expect(screen.getByTestId("transform-control")).toHaveAttribute("data-object", child.uuid);
 
     act(() => useLab.getState().removeModel("selected-model"));
@@ -122,10 +155,36 @@ describe("viewport transform tools", () => {
         root: nextRoot,
       }),
     );
-    rerender(<SelectionTransform mode="scale" />);
+    rerender(<TransformHarness mode="scale" />);
     expect(screen.getByTestId("transform-control")).toHaveAttribute("data-object", nextRoot.uuid);
 
     act(() => useLab.getState().clearScene());
     expect(screen.queryByTestId("transform-control")).not.toBeInTheDocument();
+  });
+
+  it("attaches TransformControls to a newly duplicated selected object", () => {
+    const root = new Group();
+    const child = new Group();
+    root.add(child);
+    act(() => {
+      useLab.getState().addModel({
+        id: "duplicate-transform-model",
+        fileName: "model.glb",
+        format: "glb",
+        fileSize: 1,
+        root,
+      });
+      useLab.getState().select(child);
+    });
+
+    const copy = useLab.getState().duplicateSelected()!;
+    const { getByTestId } = render(<TransformHarness mode="translate" />);
+    const gizmo = getByTestId("transform-control");
+    expect(gizmo).toHaveAttribute("data-object", copy.uuid);
+
+    const revision = useLab.getState().revision;
+    fireEvent.click(gizmo);
+    expect(copy.position.x).toBe(1.25);
+    expect(useLab.getState().revision).toBe(revision + 1);
   });
 });
