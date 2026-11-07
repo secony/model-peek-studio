@@ -28,3 +28,8 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+
+## 3D Lab architecture
+- Scene state lives in a zustand store (`src/lab/lib/store.ts`) holding three.js Object3D refs; in-place edits call `touch()` to bump `revision` so panels re-render — avoids mirroring the scene graph in React state.
+- File parsing is isolated in `src/lab/lib/loaders.ts` (no React) so future assembly features can reuse it.
+- The studio route uses `ssr: false` because WebGL cannot render on the server.

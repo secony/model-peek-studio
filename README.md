@@ -1,29 +1,24 @@
-# Welcome to your Lovable project
+# 3D Lab
 
-This project was built with [Lovable](https://lovable.dev).
+Laboratório pessoal para importar, visualizar e inspecionar modelos 3D no navegador.
 
-## Build with Lovable
+## Recursos
+- Importação local de `.glb`, `.gltf` (autocontido) e `.stl` por botão ou arrastar e soltar — nada é enviado a servidor.
+- Orbit / pan / zoom, enquadramento automático e retorno à visão inicial.
+- Hierarquia de objetos com seleção, destaque, visibilidade e remoção.
+- Edição de nome, posição, rotação (graus) e escala.
+- Grid, eixos, wireframe e câmera perspectiva/ortográfica.
+- Dimensões aproximadas (bounding box), contagem de malhas e triângulos.
 
-Open your project in the [Lovable editor](https://lovable.dev) and keep building.
+> `.gltf` com `.bin` ou texturas externas não pode ser lido como arquivo único. Exporte como `.glb`.
 
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: connect the project to GitHub and every change made in Lovable is committed straight to your repository.
-- **Full ownership**: this code is yours. Push to your repository and your changes sync back into Lovable, ready for your next prompt.
-
-## Development
-
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
-
-```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
-npm run dev
+## Executar localmente
+```bash
+bun install   # ou npm install
+bun run dev   # ou npm run dev
 ```
+Abra o endereço exibido no terminal.
 
-## Built with
-
-- TanStack Start
-- TypeScript
-- React
-- Tailwind CSS
+## Estrutura
+- `src/lab/lib` — estado da cena (zustand), carregadores e utilitários sem React.
+- `src/lab/components` — viewport, importação, hierarquia, propriedades, controles e barras.
