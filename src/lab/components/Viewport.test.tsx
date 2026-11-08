@@ -21,6 +21,8 @@ vi.mock("@react-three/drei", () => ({
       data-mode={mode}
       data-object={object.uuid}
       data-testid="transform-control"
+      onPointerDown={() => onMouseDown?.()}
+      onPointerUp={() => onMouseUp?.()}
       onClick={() => {
         onMouseDown?.();
         object.position.x += 1;
@@ -47,9 +49,21 @@ function ToolbarHarness() {
   );
 }
 
-function TransformHarness({ mode }: { mode: TransformMode }) {
+function TransformHarness({
+  mode,
+  orbitControlsRef,
+}: {
+  mode: TransformMode;
+  orbitControlsRef?: { current: { enabled: boolean } | null };
+}) {
   const transformDraggingRef = useRef(false);
-  return <SelectionTransform mode={mode} transformDraggingRef={transformDraggingRef} />;
+  return (
+    <SelectionTransform
+      mode={mode}
+      transformDraggingRef={transformDraggingRef}
+      {...(orbitControlsRef ? { orbitControlsRef } : {})}
+    />
+  );
 }
 
 describe("viewport transform tools", () => {
@@ -93,11 +107,20 @@ describe("viewport transform tools", () => {
     expect(freeMove).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("binds the gizmo to the selected child and touches the store on mouse up", () => {
+  it("binds the gizmo to the selected child and records one complete gesture", () => {
     const parent = new Group();
     const child = new Group();
     parent.rotation.y = Math.PI / 2;
     parent.add(child);
+    act(() =>
+      useLab.getState().addModel({
+        id: "gizmo-parent",
+        fileName: "parent.glb",
+        format: "glb",
+        fileSize: 1,
+        root: parent,
+      }),
+    );
     act(() => useLab.getState().select(child));
 
     const { rerender } = render(<TransformHarness mode="rotate" />);
@@ -110,8 +133,24 @@ describe("viewport transform tools", () => {
     expect(child.position.x).toBe(1);
     expect(parent.position.x).toBe(0);
     expect(useLab.getState().revision).toBe(revision + 1);
+    expect(useLab.getState().canUndo).toBe(true);
+    act(() => useLab.getState().undo());
+    expect(child.position.x).toBe(0);
+    act(() => useLab.getState().redo());
+    expect(child.position.x).toBe(1);
 
     const nextSelection = new Group();
+    const nextRoot = new Group();
+    nextRoot.add(nextSelection);
+    act(() =>
+      useLab.getState().addModel({
+        id: "gizmo-next-parent",
+        fileName: "next.glb",
+        format: "glb",
+        fileSize: 1,
+        root: nextRoot,
+      }),
+    );
     act(() => useLab.getState().select(nextSelection));
     rerender(<TransformHarness mode="scale" />);
     expect(screen.getByTestId("transform-control")).toHaveAttribute(
@@ -122,6 +161,47 @@ describe("viewport transform tools", () => {
 
     act(() => useLab.getState().select(null));
     expect(screen.queryByTestId("transform-control")).not.toBeInTheDocument();
+  });
+
+  it("does not record a no-op gesture and cancels pointercancel or unmount safely", () => {
+    const root = new Group();
+    act(() =>
+      useLab.getState().addModel({
+        id: "gizmo-cancel",
+        fileName: "cancel.glb",
+        format: "glb",
+        fileSize: 1,
+        root,
+      }),
+    );
+    const controls = { enabled: true };
+    const orbitControlsRef = { current: controls };
+    const { getByTestId, unmount } = render(
+      <TransformHarness mode="translate" orbitControlsRef={orbitControlsRef} />,
+    );
+    const control = getByTestId("transform-control");
+
+    fireEvent.pointerDown(control);
+    expect(controls.enabled).toBe(false);
+    fireEvent.pointerUp(control);
+    expect(controls.enabled).toBe(true);
+    expect(useLab.getState()).toMatchObject({ isManipulating: false, canUndo: false });
+
+    fireEvent.pointerDown(control);
+    expect(controls.enabled).toBe(false);
+    root.position.x = 7;
+    fireEvent(window, new Event("pointercancel"));
+    expect(controls.enabled).toBe(true);
+    expect(root.position.x).toBe(0);
+    expect(useLab.getState()).toMatchObject({ isManipulating: false, canUndo: false });
+
+    fireEvent.pointerDown(control);
+    expect(controls.enabled).toBe(false);
+    root.position.x = 3;
+    unmount();
+    expect(controls.enabled).toBe(true);
+    expect(root.position.x).toBe(0);
+    expect(useLab.getState()).toMatchObject({ isManipulating: false, canUndo: false });
   });
 
   it("hides the gizmo when the selected model is removed or the scene is cleared", () => {

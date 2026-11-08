@@ -1,10 +1,17 @@
 import { create } from "zustand";
-import { Euler, Group, Matrix4, Object3D, Quaternion, SkinnedMesh, Vector3 } from "three";
+import { Group, Matrix4, Object3D, Quaternion, SkinnedMesh, Vector3 } from "three";
 import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
 import type { ModelFormat } from "./loaders";
 import { disposeObjects, isEffectivelyVisible } from "./scene-utils";
 import { HistoryManager } from "./history/history-manager";
 import type { HistoryCommand } from "./history/types";
+import {
+  applyTransformSnapshot,
+  captureTransformSnapshot,
+  sameTransformSnapshot,
+  transformSnapshotWithProperty,
+  type ObjectTransformSnapshot,
+} from "./history/transform-snapshot";
 
 export interface LoadedModel {
   id: string;
@@ -39,58 +46,17 @@ interface GroupOrigin {
 type TransformProperty = "position" | "rotation" | "scale";
 type TransformAxis = "x" | "y" | "z";
 
-interface TransformSnapshot {
-  position: [number, number, number];
-  rotation: [number, number, number];
-  rotationOrder: Euler["order"];
-  scale: [number, number, number];
-  matrix: number[];
-  matrixAutoUpdate: boolean;
+interface ActiveTransformManipulation {
+  id: number;
+  object: Object3D;
+  before: ObjectTransformSnapshot;
 }
+
+export type TransformManipulationId = number;
 
 interface SelectionSnapshot {
   selected: Object3D | null;
   selectedObjects: Object3D[];
-}
-
-function captureTransform(object: Object3D): TransformSnapshot {
-  if (object.matrixAutoUpdate) object.updateMatrix();
-  return {
-    position: [object.position.x, object.position.y, object.position.z],
-    rotation: [object.rotation.x, object.rotation.y, object.rotation.z],
-    rotationOrder: object.rotation.order,
-    scale: [object.scale.x, object.scale.y, object.scale.z],
-    matrix: [...object.matrix.elements],
-    matrixAutoUpdate: object.matrixAutoUpdate,
-  };
-}
-
-function composeTransformMatrix(snapshot: TransformSnapshot) {
-  const rotation = new Euler(...snapshot.rotation, snapshot.rotationOrder);
-  const quaternion = new Quaternion().setFromEuler(rotation);
-  return new Matrix4()
-    .compose(new Vector3(...snapshot.position), quaternion, new Vector3(...snapshot.scale))
-    .toArray();
-}
-
-function applyTransform(object: Object3D, snapshot: TransformSnapshot) {
-  object.position.set(...snapshot.position);
-  object.rotation.set(...snapshot.rotation, snapshot.rotationOrder);
-  object.scale.set(...snapshot.scale);
-  object.matrixAutoUpdate = snapshot.matrixAutoUpdate;
-  object.matrix.fromArray(snapshot.matrix);
-  object.matrixWorldNeedsUpdate = true;
-  object.updateWorldMatrix(true, false);
-}
-
-function sameTransform(first: TransformSnapshot, second: TransformSnapshot) {
-  return (
-    first.matrixAutoUpdate === second.matrixAutoUpdate &&
-    first.rotationOrder === second.rotationOrder &&
-    first.position.every((value, index) => value === second.position[index]) &&
-    first.rotation.every((value, index) => value === second.rotation[index]) &&
-    first.scale.every((value, index) => value === second.scale[index])
-  );
 }
 
 function sameSelection(first: SelectionSnapshot, second: SelectionSnapshot) {
@@ -263,6 +229,7 @@ interface LabState {
   loading: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  isManipulating: boolean;
   undoLabel: string | null;
   redoLabel: string | null;
   addModel: (m: LoadedModel) => void;
@@ -283,6 +250,13 @@ interface LabState {
   ) => boolean;
   undo: () => boolean;
   redo: () => boolean;
+  beginTransformManipulation: (
+    object: Object3D,
+    initialSnapshot?: ObjectTransformSnapshot,
+  ) => TransformManipulationId | null;
+  commitTransformManipulation: (id: TransformManipulationId) => boolean;
+  cancelTransformManipulation: (id: TransformManipulationId) => boolean;
+  invalidateHistory: () => void;
   clearScene: () => void;
   select: (o: Object3D | null) => void;
   touch: () => void;
@@ -299,22 +273,30 @@ type LabStoreSetter = (
 ) => void;
 
 const history = new HistoryManager();
+let activeTransformManipulation: ActiveTransformManipulation | null = null;
+let nextTransformManipulationId = 0;
 
-function publishHistoryState(set: LabStoreSetter, revisionChanged = false) {
+function publishHistoryState(
+  set: LabStoreSetter,
+  revisionChanged = false,
+  isManipulating = activeTransformManipulation !== null,
+) {
   const state = history.state;
   set((current) => {
     if (
       !revisionChanged &&
-      current.canUndo === state.canUndo &&
-      current.canRedo === state.canRedo &&
+      current.isManipulating === isManipulating &&
+      current.canUndo === (state.canUndo && !isManipulating) &&
+      current.canRedo === (state.canRedo && !isManipulating) &&
       current.undoLabel === state.undoLabel &&
       current.redoLabel === state.redoLabel
     ) {
       return current;
     }
     return {
-      canUndo: state.canUndo,
-      canRedo: state.canRedo,
+      canUndo: state.canUndo && !isManipulating,
+      canRedo: state.canRedo && !isManipulating,
+      isManipulating,
       undoLabel: state.undoLabel,
       redoLabel: state.redoLabel,
       ...(revisionChanged ? { revision: current.revision + 1 } : {}),
@@ -323,6 +305,7 @@ function publishHistoryState(set: LabStoreSetter, revisionChanged = false) {
 }
 
 function executeHistoryCommand(set: LabStoreSetter, command: HistoryCommand) {
+  if (activeTransformManipulation) return false;
   let executed = false;
   try {
     history.execute(command);
@@ -334,6 +317,7 @@ function executeHistoryCommand(set: LabStoreSetter, command: HistoryCommand) {
 }
 
 function moveHistory(set: LabStoreSetter, direction: "undo" | "redo") {
+  if (activeTransformManipulation) return false;
   let changed = false;
   try {
     changed = direction === "undo" ? history.undo() : history.redo();
@@ -404,9 +388,11 @@ export const useLab = create<LabState>((set, get) => ({
   loading: false,
   canUndo: history.canUndo,
   canRedo: history.canRedo,
+  isManipulating: false,
   undoLabel: history.undoLabel,
   redoLabel: history.redoLabel,
   addModel: (m) => {
+    get().invalidateHistory();
     const { sceneRoot } = get();
     markModelOwner(m.root, m.id);
     sceneRoot.add(m.root);
@@ -419,8 +405,10 @@ export const useLab = create<LabState>((set, get) => ({
   },
   removeModel: (id) => {
     const state = get();
+    if (state.isManipulating) return;
     const m = state.models.find((x) => x.id === id);
     if (!m) return;
+    get().invalidateHistory();
     const roots = findOwnedRoots(state.sceneRoot, id);
     if (!roots.length) roots.push(m.root);
     const oldParents = roots.map((root) => root.parent);
@@ -449,12 +437,19 @@ export const useLab = create<LabState>((set, get) => ({
   },
   removeObject: (object) => {
     const state = get();
-    if (object === state.sceneRoot || !containsObject(state.sceneRoot, object)) return;
+    if (
+      state.isManipulating ||
+      object === state.sceneRoot ||
+      !containsObject(state.sceneRoot, object)
+    )
+      return;
     const directModel = state.models.find((model) => model.root === object);
     if (directModel) {
       get().removeModel(directModel.id);
       return;
     }
+
+    get().invalidateHistory();
 
     const containedModels = state.models.filter((model) => containsObject(object, model.root));
     const roots = [object];
@@ -494,6 +489,7 @@ export const useLab = create<LabState>((set, get) => ({
   },
   duplicateSelected: () => {
     const state = get();
+    if (state.isManipulating) return null;
     const selected = state.selected;
     if (!selected) return null;
     const sourceModel = state.models.find((model) => model.root === selected);
@@ -515,6 +511,7 @@ export const useLab = create<LabState>((set, get) => ({
 
     const copy = skinnedMeshes.length > 0 ? cloneSkinned(selected) : selected.clone(true);
     copy.position.x += 0.25;
+    get().invalidateHistory();
 
     if (sourceModel) {
       let id: string;
@@ -596,6 +593,7 @@ export const useLab = create<LabState>((set, get) => ({
     }),
   canGroupSelection: () => resolveGroupParent(get().selectedObjects, get().sceneRoot) !== null,
   groupSelection: () => {
+    if (get().isManipulating) return null;
     const { selectedObjects, sceneRoot } = get();
     const parent = resolveGroupParent(selectedObjects, sceneRoot);
     if (!parent) return null;
@@ -634,6 +632,7 @@ export const useLab = create<LabState>((set, get) => ({
       ...directBranches.map((branch) => parent.children.indexOf(branch!)),
     );
 
+    get().invalidateHistory();
     const group = new Group();
     group.name = "Grupo";
     group.userData[ORGANIZATION_GROUP_FLAG] = true;
@@ -663,6 +662,7 @@ export const useLab = create<LabState>((set, get) => ({
     return group;
   },
   ungroupSelected: () => {
+    if (get().isManipulating) return false;
     const group = get().selected;
     if (!isOrganizationGroup(group)) return false;
     const { sceneRoot } = get();
@@ -701,6 +701,7 @@ export const useLab = create<LabState>((set, get) => ({
           first.origin.index - second.origin.index,
       );
 
+    get().invalidateHistory();
     group.removeFromParent();
     entries.forEach(({ child, parent, matrix, origin }) => {
       child.removeFromParent();
@@ -743,29 +744,100 @@ export const useLab = create<LabState>((set, get) => ({
     ) {
       return false;
     }
-    const before = captureTransform(object);
-    const after: TransformSnapshot = {
-      ...before,
-      position: [...before.position],
-      rotation: [...before.rotation],
-      scale: [...before.scale],
-    };
+    const before = captureTransformSnapshot(object);
     const axisIndex = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-    after[property][axisIndex] = value;
-    if (sameTransform(before, after)) return false;
-    after.matrix = composeTransformMatrix(after);
+    const after = transformSnapshotWithProperty(before, property, axisIndex, value);
+    if (sameTransformSnapshot(before, after)) return false;
     const propertyLabel =
       property === "position" ? "posição" : property === "rotation" ? "rotação" : "escala";
     return executeHistoryCommand(set, {
       label: `Alterar ${propertyLabel} ${axis.toUpperCase()}`,
-      redo: () => applyTransform(object, after),
-      undo: () => applyTransform(object, before),
+      redo: () => applyTransformSnapshot(object, after),
+      undo: () => applyTransformSnapshot(object, before),
       dispose: () => {},
     });
   },
   undo: () => moveHistory(set, "undo"),
   redo: () => moveHistory(set, "redo"),
+  beginTransformManipulation: (object, initialSnapshot) => {
+    const state = get();
+    if (
+      activeTransformManipulation ||
+      !containsObject(state.sceneRoot, object) ||
+      !isEffectivelyVisible(object)
+    ) {
+      return null;
+    }
+    const id = ++nextTransformManipulationId;
+    activeTransformManipulation = {
+      id,
+      object,
+      before: initialSnapshot ?? captureTransformSnapshot(object),
+    };
+    publishHistoryState(set, false, true);
+    return id;
+  },
+  commitTransformManipulation: (id) => {
+    const active = activeTransformManipulation;
+    if (!active || active.id !== id) return false;
+    const after = captureTransformSnapshot(active.object);
+    const changed = !sameTransformSnapshot(active.before, after);
+    let committed = false;
+    try {
+      if (!changed) return false;
+      history.execute({
+        label: `Transformar ${active.object.name || active.object.type}`,
+        redo: () => applyTransformSnapshot(active.object, after),
+        undo: () => applyTransformSnapshot(active.object, active.before),
+        dispose: () => {},
+      });
+      committed = true;
+      return true;
+    } catch {
+      applyTransformSnapshot(active.object, active.before);
+      return false;
+    } finally {
+      activeTransformManipulation = null;
+      publishHistoryState(set, changed, false);
+      if (!committed && changed) {
+        set((current) => ({ revision: current.revision + 1 }));
+      }
+    }
+  },
+  cancelTransformManipulation: (id) => {
+    const active = activeTransformManipulation;
+    if (!active || active.id !== id) return false;
+    const changed = !sameTransformSnapshot(active.before, captureTransformSnapshot(active.object));
+    try {
+      if (changed) applyTransformSnapshot(active.object, active.before);
+      return true;
+    } finally {
+      activeTransformManipulation = null;
+      publishHistoryState(set, changed, false);
+    }
+  },
+  // Barriers for non-reversible structural edits: import/add, remove, duplicate,
+  // group/ungroup and clear. History commands currently retain Object3D refs only
+  // and their dispose() methods do not dispose scene resources.
+  invalidateHistory: () => {
+    const active = activeTransformManipulation;
+    let restoredTransform = false;
+    if (active) {
+      restoredTransform = !sameTransformSnapshot(
+        active.before,
+        captureTransformSnapshot(active.object),
+      );
+      if (restoredTransform) applyTransformSnapshot(active.object, active.before);
+      activeTransformManipulation = null;
+    }
+    try {
+      history.clear();
+    } finally {
+      publishHistoryState(set, restoredTransform, false);
+    }
+  },
   clearScene: () => {
+    get().invalidateHistory();
     const { sceneRoot, activeImports } = get();
     const roots = [...sceneRoot.children];
     set((s) => ({ sceneGeneration: s.sceneGeneration + 1 }));

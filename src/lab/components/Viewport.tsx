@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import {
   Environment,
@@ -22,6 +22,7 @@ import {
 } from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { useLab } from "../lib/store";
+import type { TransformManipulationId } from "../lib/store";
 import {
   cancelFreeDragSession,
   canStartFreeDrag,
@@ -34,6 +35,7 @@ import { getBounds, isEffectivelyVisible, setWireframe } from "../lib/scene-util
 
 const DEFAULT_TARGET = new Vector3(0, 0, 0);
 const DEFAULT_DIR = new Vector3(1, 0.8, 1).normalize();
+type OrbitControlToggle = Pick<OrbitControlsImpl, "enabled">;
 
 export type TransformMode = "translate" | "rotate" | "scale";
 
@@ -51,10 +53,12 @@ function Models({
   freeMoveEnabled,
   transformDraggingRef,
   suppressClickPointerRef,
+  orbitControlsRef,
 }: {
   freeMoveEnabled: boolean;
   transformDraggingRef: MutableRefObject<boolean>;
   suppressClickPointerRef: MutableRefObject<number | null>;
+  orbitControlsRef: MutableRefObject<OrbitControlToggle | null>;
 }) {
   const models = useLab((s) => s.models);
   const sceneRoot = useLab((s) => s.sceneRoot);
@@ -62,9 +66,20 @@ function Models({
   const select = useLab((s) => s.select);
   const selected = useLab((s) => s.selected);
   const touch = useLab((s) => s.touch);
+  const beginTransformManipulation = useLab((s) => s.beginTransformManipulation);
+  const commitTransformManipulation = useLab((s) => s.commitTransformManipulation);
+  const cancelTransformManipulation = useLab((s) => s.cancelTransformManipulation);
   const { camera, gl, raycaster, controls } = useThree();
   const dragSessionRef = useRef<FreeDragSession | null>(null);
   const pointerIdRef = useRef<number | null>(null);
+  const manipulationIdRef = useRef<TransformManipulationId | null>(null);
+
+  useEffect(() => {
+    orbitControlsRef.current = controls as OrbitControlToggle | null;
+    return () => {
+      if (orbitControlsRef.current === controls) orbitControlsRef.current = null;
+    };
+  }, [controls, orbitControlsRef]);
 
   useEffect(() => {
     const endDrag = (cancel: boolean) => {
@@ -75,9 +90,15 @@ function Models({
       if (!cancel && changed && pointerId !== null) {
         suppressClickPointerRef.current = pointerId;
       }
-      if (cancel ? changed : true) touch();
+      const manipulationId = manipulationIdRef.current;
+      if (manipulationId !== null) {
+        if (cancel) cancelTransformManipulation(manipulationId);
+        else commitTransformManipulation(manipulationId);
+      }
+      if (!cancel && changed && manipulationId === null) touch();
       dragSessionRef.current = null;
       pointerIdRef.current = null;
+      manipulationIdRef.current = null;
       try {
         if (pointerId !== null && gl.domElement.hasPointerCapture(pointerId)) {
           gl.domElement.releasePointerCapture(pointerId);
@@ -142,7 +163,15 @@ function Models({
       window.removeEventListener("blur", handleWindowBlur);
       endDrag(true);
     };
-  }, [camera, gl, raycaster, suppressClickPointerRef, touch]);
+  }, [
+    camera,
+    cancelTransformManipulation,
+    commitTransformManipulation,
+    gl,
+    raycaster,
+    suppressClickPointerRef,
+    touch,
+  ]);
 
   const handlePointerDown = (event: ThreeEvent<PointerEvent>) => {
     suppressClickPointerRef.current = null;
@@ -159,8 +188,14 @@ function Models({
     const orbitControls = controls as OrbitControlsImpl | null;
     const session = createFreeDragSession(selected, camera, event.ray, orbitControls ?? null);
     if (!session) return;
+    const manipulationId = beginTransformManipulation(selected, session.startTransform);
+    if (manipulationId === null) {
+      cancelFreeDragSession(session);
+      return;
+    }
     dragSessionRef.current = session;
     pointerIdRef.current = event.pointerId;
+    manipulationIdRef.current = manipulationId;
     try {
       gl.domElement.setPointerCapture(event.pointerId);
     } catch {
@@ -210,19 +245,66 @@ function SelectionHighlight() {
 export function SelectionTransform({
   mode,
   transformDraggingRef,
+  orbitControlsRef,
 }: {
   mode: TransformMode;
   transformDraggingRef: MutableRefObject<boolean>;
+  orbitControlsRef?: MutableRefObject<OrbitControlToggle | null>;
 }) {
   const selected = useLab((s) => s.selected);
-  const touch = useLab((s) => s.touch);
+  const beginTransformManipulation = useLab((s) => s.beginTransformManipulation);
+  const commitTransformManipulation = useLab((s) => s.commitTransformManipulation);
+  const cancelTransformManipulation = useLab((s) => s.cancelTransformManipulation);
+  const manipulationIdRef = useRef<TransformManipulationId | null>(null);
+  const orbitWasEnabledRef = useRef<boolean | null>(null);
+  const orbitControlsTargetRef = useRef<OrbitControlToggle | null>(null);
 
-  useEffect(
-    () => () => {
+  const restoreOrbitControls = useCallback(() => {
+    if (orbitWasEnabledRef.current === null) return;
+    if (orbitControlsTargetRef.current) {
+      orbitControlsTargetRef.current.enabled = orbitWasEnabledRef.current;
+    }
+    orbitWasEnabledRef.current = null;
+    orbitControlsTargetRef.current = null;
+  }, []);
+
+  const finishGesture = useCallback(
+    (cancel: boolean) => {
+      const id = manipulationIdRef.current;
+      if (id === null) return false;
+      manipulationIdRef.current = null;
       transformDraggingRef.current = false;
+      restoreOrbitControls();
+      if (cancel) cancelTransformManipulation(id);
+      else commitTransformManipulation(id);
+      return true;
     },
-    [selected, transformDraggingRef],
+    [
+      cancelTransformManipulation,
+      commitTransformManipulation,
+      restoreOrbitControls,
+      transformDraggingRef,
+    ],
   );
+
+  useEffect(() => {
+    const cancelGesture = () => {
+      if (!finishGesture(true)) return;
+      // The installed TransformControls listens for document pointerup but has no
+      // pointercancel handler; synthesize its normal end event to remove pointermove.
+      document.dispatchEvent(new MouseEvent("pointerup", { button: 0 }));
+    };
+    const handlePointerCancel = () => cancelGesture();
+    const handleBlur = () => cancelGesture();
+    window.addEventListener("pointercancel", handlePointerCancel, true);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("pointercancel", handlePointerCancel, true);
+      window.removeEventListener("blur", handleBlur);
+      cancelGesture();
+      transformDraggingRef.current = false;
+    };
+  }, [finishGesture, selected, transformDraggingRef]);
 
   if (!selected || !isEffectivelyVisible(selected)) return null;
 
@@ -231,12 +313,19 @@ export function SelectionTransform({
       object={selected}
       mode={mode}
       onMouseDown={() => {
+        if (manipulationIdRef.current !== null) return;
+        const id = beginTransformManipulation(selected);
+        if (id === null) return;
+        manipulationIdRef.current = id;
         transformDraggingRef.current = true;
+        if (orbitControlsRef?.current) {
+          const controls = orbitControlsRef.current;
+          orbitControlsTargetRef.current = controls;
+          orbitWasEnabledRef.current = controls.enabled;
+          controls.enabled = false;
+        }
       }}
-      onMouseUp={() => {
-        transformDraggingRef.current = false;
-        touch();
-      }}
+      onMouseUp={() => finishGesture(false)}
     />
   );
 }
@@ -365,6 +454,7 @@ export function Viewport() {
   const [freeMoveEnabled, setFreeMoveEnabled] = useState(false);
   const transformDraggingRef = useRef(false);
   const suppressClickPointerRef = useRef<number | null>(null);
+  const orbitControlsRef = useRef<OrbitControlToggle | null>(null);
   return (
     <>
       <Canvas
@@ -414,9 +504,14 @@ export function Viewport() {
           freeMoveEnabled={freeMoveEnabled}
           transformDraggingRef={transformDraggingRef}
           suppressClickPointerRef={suppressClickPointerRef}
+          orbitControlsRef={orbitControlsRef}
         />
         <SelectionHighlight />
-        <SelectionTransform mode={transformMode} transformDraggingRef={transformDraggingRef} />
+        <SelectionTransform
+          mode={transformMode}
+          transformDraggingRef={transformDraggingRef}
+          orbitControlsRef={orbitControlsRef}
+        />
       </Canvas>
       <TransformToolbar
         mode={transformMode}

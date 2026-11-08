@@ -1,5 +1,10 @@
 import { Matrix4, Plane, Vector3, type Camera, type Object3D, type Ray } from "three";
 import { isEffectivelyVisible } from "./scene-utils";
+import {
+  applyTransformSnapshot,
+  captureTransformSnapshot,
+  type ObjectTransformSnapshot,
+} from "./history/transform-snapshot";
 
 export interface FreeDragControls {
   enabled: boolean;
@@ -13,6 +18,7 @@ export interface FreeDragSession {
   startWorldPosition: Vector3;
   startLocalPosition: Vector3;
   startLocalMatrix: Matrix4;
+  startTransform: ObjectTransformSnapshot;
   controls: FreeDragControls | null;
   controlsWereEnabled: boolean;
   didMove: boolean;
@@ -61,6 +67,7 @@ export function createFreeDragSession(
     startWorldPosition,
     startLocalPosition: object.position.clone(),
     startLocalMatrix: object.matrix.clone(),
+    startTransform: captureTransformSnapshot(object),
     controls,
     controlsWereEnabled: controls?.enabled ?? false,
     didMove: false,
@@ -96,10 +103,7 @@ export function finishFreeDragSession(session: FreeDragSession) {
 export function cancelFreeDragSession(session: FreeDragSession) {
   const changed = session.didMove;
   if (changed) {
-    session.object.position.copy(session.startLocalPosition);
-    if (session.object.matrixAutoUpdate) session.object.updateMatrix();
-    else session.object.matrix.copy(session.startLocalMatrix);
-    session.object.matrixWorldNeedsUpdate = true;
+    applyTransformSnapshot(session.object, session.startTransform);
   }
   if (session.controls) session.controls.enabled = session.controlsWereEnabled;
   return changed;
