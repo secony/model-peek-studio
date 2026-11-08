@@ -22,8 +22,10 @@ function NumberField({
   useEffect(() => setText(formatNumber(value, 3)), [value]);
   const commit = () => {
     const v = parseFloat(text.replace(",", "."));
-    if (Number.isFinite(v)) onCommit(v);
-    else setText(formatNumber(value, 3));
+    if (Number.isFinite(v)) {
+      onCommit(v);
+      setText(formatNumber(v, 3));
+    } else setText(formatNumber(value, 3));
   };
   return (
     <div className="relative">
@@ -44,7 +46,7 @@ function NumberField({
 }
 
 function VectorRow({ obj, prop, label }: { obj: Object3D; prop: Vec; label: string }) {
-  const touch = useLab((s) => s.touch);
+  const setObjectTransform = useLab((s) => s.setObjectTransform);
   const isRot = prop === "rotation";
   return (
     <div className="space-y-1.5">
@@ -56,8 +58,7 @@ function VectorRow({ obj, prop, label }: { obj: Object3D; prop: Vec; label: stri
             axis={a}
             value={isRot ? MathUtils.radToDeg(obj.rotation[a]) : obj[prop][a]}
             onCommit={(v) => {
-              obj[prop][a] = isRot ? MathUtils.degToRad(v) : v;
-              touch();
+              setObjectTransform(obj, prop, a, isRot ? MathUtils.degToRad(v) : v);
             }}
           />
         ))}
@@ -79,9 +80,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 export function PropertiesPanel() {
   const selected = useLab((s) => s.selected);
+  const renameObject = useLab((s) => s.renameObject);
   const models = useLab((s) => s.models);
-  const touch = useLab((s) => s.touch);
-  useLab((s) => s.revision);
+  const revision = useLab((s) => s.revision);
 
   if (!selected)
     return (
@@ -107,13 +108,13 @@ export function PropertiesPanel() {
     <div>
       <Section title="Objeto">
         <Input
-          key={selected.uuid}
+          key={`${selected.uuid}-${revision}`}
           className="h-7 text-xs"
           defaultValue={selected.name}
           placeholder={selected.type}
           onBlur={(e) => {
-            selected.name = e.target.value;
-            touch();
+            renameObject(selected, e.target.value);
+            e.target.value = selected.name;
           }}
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
         />

@@ -1,8 +1,10 @@
 import { create } from "zustand";
-import { Group, Matrix4, Object3D, Quaternion, SkinnedMesh, Vector3 } from "three";
+import { Euler, Group, Matrix4, Object3D, Quaternion, SkinnedMesh, Vector3 } from "three";
 import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
 import type { ModelFormat } from "./loaders";
 import { disposeObjects, isEffectivelyVisible } from "./scene-utils";
+import { HistoryManager } from "./history/history-manager";
+import type { HistoryCommand } from "./history/types";
 
 export interface LoadedModel {
   id: string;
@@ -34,6 +36,71 @@ interface GroupOrigin {
   index: number;
 }
 
+type TransformProperty = "position" | "rotation" | "scale";
+type TransformAxis = "x" | "y" | "z";
+
+interface TransformSnapshot {
+  position: [number, number, number];
+  rotation: [number, number, number];
+  rotationOrder: Euler["order"];
+  scale: [number, number, number];
+  matrix: number[];
+  matrixAutoUpdate: boolean;
+}
+
+interface SelectionSnapshot {
+  selected: Object3D | null;
+  selectedObjects: Object3D[];
+}
+
+function captureTransform(object: Object3D): TransformSnapshot {
+  if (object.matrixAutoUpdate) object.updateMatrix();
+  return {
+    position: [object.position.x, object.position.y, object.position.z],
+    rotation: [object.rotation.x, object.rotation.y, object.rotation.z],
+    rotationOrder: object.rotation.order,
+    scale: [object.scale.x, object.scale.y, object.scale.z],
+    matrix: [...object.matrix.elements],
+    matrixAutoUpdate: object.matrixAutoUpdate,
+  };
+}
+
+function composeTransformMatrix(snapshot: TransformSnapshot) {
+  const rotation = new Euler(...snapshot.rotation, snapshot.rotationOrder);
+  const quaternion = new Quaternion().setFromEuler(rotation);
+  return new Matrix4()
+    .compose(new Vector3(...snapshot.position), quaternion, new Vector3(...snapshot.scale))
+    .toArray();
+}
+
+function applyTransform(object: Object3D, snapshot: TransformSnapshot) {
+  object.position.set(...snapshot.position);
+  object.rotation.set(...snapshot.rotation, snapshot.rotationOrder);
+  object.scale.set(...snapshot.scale);
+  object.matrixAutoUpdate = snapshot.matrixAutoUpdate;
+  object.matrix.fromArray(snapshot.matrix);
+  object.matrixWorldNeedsUpdate = true;
+  object.updateWorldMatrix(true, false);
+}
+
+function sameTransform(first: TransformSnapshot, second: TransformSnapshot) {
+  return (
+    first.matrixAutoUpdate === second.matrixAutoUpdate &&
+    first.rotationOrder === second.rotationOrder &&
+    first.position.every((value, index) => value === second.position[index]) &&
+    first.rotation.every((value, index) => value === second.rotation[index]) &&
+    first.scale.every((value, index) => value === second.scale[index])
+  );
+}
+
+function sameSelection(first: SelectionSnapshot, second: SelectionSnapshot) {
+  return (
+    first.selected === second.selected &&
+    first.selectedObjects.length === second.selectedObjects.length &&
+    first.selectedObjects.every((object, index) => object === second.selectedObjects[index])
+  );
+}
+
 export function isOrganizationGroup(object: Object3D | null): object is Group {
   return object instanceof Group && object.userData[ORGANIZATION_GROUP_FLAG] === true;
 }
@@ -50,13 +117,6 @@ function containsObject(root: Object3D, object: Object3D | null) {
     if (candidate === object) contains = true;
   });
   return contains;
-}
-
-function isDescendantOrSelf(ancestor: Object3D, object: Object3D | null) {
-  for (let current = object; current; current = current.parent) {
-    if (current === ancestor) return true;
-  }
-  return false;
 }
 
 function markModelOwner(root: Object3D, modelId: string) {
@@ -201,6 +261,10 @@ interface LabState {
   wireframe: boolean;
   projection: Projection;
   loading: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  undoLabel: string | null;
+  redoLabel: string | null;
   addModel: (m: LoadedModel) => void;
   removeModel: (id: string) => void;
   removeObject: (object: Object3D) => void;
@@ -211,6 +275,14 @@ interface LabState {
   groupSelection: () => Group | null;
   ungroupSelected: () => boolean;
   renameObject: (object: Object3D, name: string) => boolean;
+  setObjectTransform: (
+    object: Object3D,
+    property: TransformProperty,
+    axis: TransformAxis,
+    value: number,
+  ) => boolean;
+  undo: () => boolean;
+  redo: () => boolean;
   clearScene: () => void;
   select: (o: Object3D | null) => void;
   touch: () => void;
@@ -220,6 +292,100 @@ interface LabState {
   finishImport: (id: string) => void;
   toggle: (k: "showGrid" | "showAxes" | "wireframe") => void;
   setProjection: (p: Projection) => void;
+}
+
+type LabStoreSetter = (
+  partial: Partial<LabState> | ((state: LabState) => Partial<LabState>),
+) => void;
+
+const history = new HistoryManager();
+
+function publishHistoryState(set: LabStoreSetter, revisionChanged = false) {
+  const state = history.state;
+  set((current) => {
+    if (
+      !revisionChanged &&
+      current.canUndo === state.canUndo &&
+      current.canRedo === state.canRedo &&
+      current.undoLabel === state.undoLabel &&
+      current.redoLabel === state.redoLabel
+    ) {
+      return current;
+    }
+    return {
+      canUndo: state.canUndo,
+      canRedo: state.canRedo,
+      undoLabel: state.undoLabel,
+      redoLabel: state.redoLabel,
+      ...(revisionChanged ? { revision: current.revision + 1 } : {}),
+    };
+  });
+}
+
+function executeHistoryCommand(set: LabStoreSetter, command: HistoryCommand) {
+  let executed = false;
+  try {
+    history.execute(command);
+    executed = true;
+    return true;
+  } finally {
+    publishHistoryState(set, executed);
+  }
+}
+
+function moveHistory(set: LabStoreSetter, direction: "undo" | "redo") {
+  let changed = false;
+  try {
+    changed = direction === "undo" ? history.undo() : history.redo();
+    return changed;
+  } finally {
+    publishHistoryState(set, changed);
+  }
+}
+
+function selectionSnapshot(get: () => LabState): SelectionSnapshot {
+  const state = get();
+  return { selected: state.selected, selectedObjects: [...state.selectedObjects] };
+}
+
+function applyVisibility(
+  object: Object3D,
+  visible: boolean,
+  get: () => LabState,
+  set: LabStoreSetter,
+  transition?: { expected: SelectionSnapshot; next: SelectionSnapshot },
+): SelectionSnapshot {
+  object.visible = visible;
+  const current = get();
+  const currentSelection: SelectionSnapshot = {
+    selected: current.selected,
+    selectedObjects: current.selectedObjects,
+  };
+  let selectedObjects = current.selectedObjects.filter(isEffectivelyVisible);
+  let selected =
+    current.selected && isEffectivelyVisible(current.selected)
+      ? current.selected
+      : (selectedObjects.at(-1) ?? null);
+
+  if (transition && sameSelection(currentSelection, transition.expected)) {
+    const isRestorable = (candidate: Object3D | null) =>
+      candidate !== null &&
+      containsObject(current.sceneRoot, candidate) &&
+      isEffectivelyVisible(candidate);
+    selectedObjects = transition.next.selectedObjects.filter(isRestorable);
+    selected = isRestorable(transition.next.selected)
+      ? transition.next.selected
+      : (selectedObjects.at(-1) ?? null);
+  }
+
+  if (
+    selected !== current.selected ||
+    selectedObjects.length !== current.selectedObjects.length ||
+    selectedObjects.some((candidate, index) => candidate !== current.selectedObjects[index])
+  ) {
+    set({ selected, selectedObjects });
+  }
+  return selectionSnapshot(get);
 }
 
 export const useLab = create<LabState>((set, get) => ({
@@ -236,6 +402,10 @@ export const useLab = create<LabState>((set, get) => ({
   wireframe: false,
   projection: "perspective",
   loading: false,
+  canUndo: history.canUndo,
+  canRedo: history.canRedo,
+  undoLabel: history.undoLabel,
+  redoLabel: history.redoLabel,
   addModel: (m) => {
     const { sceneRoot } = get();
     markModelOwner(m.root, m.id);
@@ -383,20 +553,32 @@ export const useLab = create<LabState>((set, get) => ({
   toggleObjectVisibility: (object) => {
     const state = get();
     if (!containsObject(state.sceneRoot, object)) return false;
-    object.visible = !object.visible;
-    set((current) => {
-      if (isEffectivelyVisible(object)) return { revision: current.revision + 1 };
+    const beforeVisible = object.visible;
+    const afterVisible = !beforeVisible;
+    const beforeSelection = selectionSnapshot(get);
+    let afterSelection: SelectionSnapshot | null = null;
+    const label = `${afterVisible ? "Mostrar" : "Ocultar"} ${object.name || object.type}`;
 
-      const selectedObjects = current.selectedObjects.filter(
-        (candidate) => !isDescendantOrSelf(object, candidate),
-      );
-      const selected =
-        current.selected && isDescendantOrSelf(object, current.selected)
-          ? (selectedObjects.at(-1) ?? null)
-          : current.selected;
-      return { selected, selectedObjects, revision: current.revision + 1 };
+    return executeHistoryCommand(set, {
+      label,
+      redo: () => {
+        const transition = afterSelection
+          ? { expected: beforeSelection, next: afterSelection }
+          : undefined;
+        const result = applyVisibility(object, afterVisible, get, set, transition);
+        afterSelection ??= result;
+      },
+      undo: () => {
+        applyVisibility(
+          object,
+          beforeVisible,
+          get,
+          set,
+          afterSelection ? { expected: afterSelection, next: beforeSelection } : undefined,
+        );
+      },
+      dispose: () => {},
     });
-    return true;
   },
   toggleSelection: (object) =>
     set((state) => {
@@ -536,12 +718,53 @@ export const useLab = create<LabState>((set, get) => ({
     return true;
   },
   renameObject: (object, name) => {
+    if (!containsObject(get().sceneRoot, object)) return false;
     const normalizedName = name.trim();
     if (!normalizedName) return false;
-    object.name = normalizedName;
-    get().touch();
-    return true;
+    const beforeName = object.name;
+    if (beforeName === normalizedName) return true;
+    return executeHistoryCommand(set, {
+      label: "Renomear objeto",
+      redo: () => {
+        object.name = normalizedName;
+      },
+      undo: () => {
+        object.name = beforeName;
+      },
+      dispose: () => {},
+    });
   },
+  setObjectTransform: (object, property, axis, value) => {
+    if (
+      !containsObject(get().sceneRoot, object) ||
+      get().selected !== object ||
+      !isEffectivelyVisible(object) ||
+      !Number.isFinite(value)
+    ) {
+      return false;
+    }
+    const before = captureTransform(object);
+    const after: TransformSnapshot = {
+      ...before,
+      position: [...before.position],
+      rotation: [...before.rotation],
+      scale: [...before.scale],
+    };
+    const axisIndex = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+    after[property][axisIndex] = value;
+    if (sameTransform(before, after)) return false;
+    after.matrix = composeTransformMatrix(after);
+    const propertyLabel =
+      property === "position" ? "posição" : property === "rotation" ? "rotação" : "escala";
+    return executeHistoryCommand(set, {
+      label: `Alterar ${propertyLabel} ${axis.toUpperCase()}`,
+      redo: () => applyTransform(object, after),
+      undo: () => applyTransform(object, before),
+      dispose: () => {},
+    });
+  },
+  undo: () => moveHistory(set, "undo"),
+  redo: () => moveHistory(set, "redo"),
   clearScene: () => {
     const { sceneRoot, activeImports } = get();
     const roots = [...sceneRoot.children];
