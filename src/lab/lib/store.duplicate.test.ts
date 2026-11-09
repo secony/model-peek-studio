@@ -45,6 +45,127 @@ describe("object duplication", () => {
     expect(mesh.position.toArray()).toEqual([1, 2, 3]);
     expect(useLab.getState().selected).toBe(copy);
     expect(useLab.getState().revision).toBe(revision + 1);
+    expect(useLab.getState().canUndo).toBe(true);
+  });
+
+  it("undoes and redoes the same duplicate at its original parent and sibling index", () => {
+    const root = new Group();
+    const before = new Group();
+    const original = new Mesh(new BoxGeometry(), new MeshBasicMaterial());
+    const after = new Group();
+    original.name = "Original com metadados";
+    original.userData["customTag"] = { nested: ["preservado"] };
+    root.add(before, original, after);
+    useLab.getState().addModel({
+      id: "duplicate-undo-model",
+      fileName: "duplicate.glb",
+      format: "glb",
+      fileSize: 1,
+      root,
+    });
+    useLab.getState().select(original);
+
+    const copy = useLab.getState().duplicateSelected() as Mesh;
+    const uuid = copy.uuid;
+    const index = root.children.indexOf(copy);
+    const modelRecords = useLab.getState().models;
+    const geometryDispose = vi.spyOn(copy.geometry, "dispose");
+    const materialDispose = vi.spyOn(copy.material as MeshBasicMaterial, "dispose");
+    expect(copy.userData["customTag"]).toEqual({ nested: ["preservado"] });
+    expect(useLab.getState().selected).toBe(copy);
+
+    expect(useLab.getState().undo()).toBe(true);
+    expect(copy.parent).toBeNull();
+    expect(useLab.getState().selected).toBe(original);
+    expect(useLab.getState().models).toBe(modelRecords);
+    expect(geometryDispose).not.toHaveBeenCalled();
+    expect(materialDispose).not.toHaveBeenCalled();
+
+    expect(useLab.getState().redo()).toBe(true);
+    expect(copy.uuid).toBe(uuid);
+    expect(copy.parent).toBe(root);
+    expect(root.children.indexOf(copy)).toBe(index);
+    expect(copy.userData["customTag"]).toEqual({ nested: ["preservado"] });
+    expect(useLab.getState().selected).toBe(copy);
+    expect(useLab.getState().models).toBe(modelRecords);
+    expect(geometryDispose).not.toHaveBeenCalled();
+    expect(materialDispose).not.toHaveBeenCalled();
+  });
+
+  it("restores a duplicate model record and disposes its unique skeleton only when an undone branch is discarded", () => {
+    const root = new Group();
+    const bone = new Bone();
+    const skinned = new SkinnedMesh(new BoxGeometry(), new MeshBasicMaterial());
+    skinned.bind(new Skeleton([bone]));
+    root.add(bone, skinned);
+    useLab.getState().addModel({
+      id: "duplicate-retained-rig",
+      fileName: "rig.glb",
+      format: "glb",
+      fileSize: 12,
+      root,
+    });
+
+    const copy = useLab.getState().duplicateSelected() as Group;
+    const copyModel = useLab.getState().models.at(-1)!;
+    const copyMesh = copy.children.find(
+      (child) => (child as SkinnedMesh).isSkinnedMesh,
+    ) as SkinnedMesh;
+    const skeletonDispose = vi.spyOn(copyMesh.skeleton, "dispose");
+    const geometryDispose = vi.spyOn(copyMesh.geometry, "dispose");
+    const materialDispose = vi.spyOn(copyMesh.material as MeshBasicMaterial, "dispose");
+    expect(copyModel).toMatchObject({
+      id: expect.stringContaining("duplicate-retained-rig-copy-"),
+      fileName: "Cópia de rig.glb",
+      format: "glb",
+      fileSize: 12,
+      root: copy,
+    });
+
+    expect(useLab.getState().undo()).toBe(true);
+    expect(useLab.getState().models).toHaveLength(1);
+    expect(skeletonDispose).not.toHaveBeenCalled();
+    expect(useLab.getState().redo()).toBe(true);
+    expect(useLab.getState().models.at(-1)).toBe(copyModel);
+    expect(copyModel.root).toBe(copy);
+    expect(useLab.getState().selected).toBe(copy);
+    expect(skeletonDispose).not.toHaveBeenCalled();
+    expect(useLab.getState().undo()).toBe(true);
+    expect(useLab.getState().selected).toBe(root);
+    useLab.getState().renameObject(root, "Nova ramificação");
+
+    expect(skeletonDispose).toHaveBeenCalledOnce();
+    expect(geometryDispose).not.toHaveBeenCalled();
+    expect(materialDispose).not.toHaveBeenCalled();
+    expect(copy.parent).toBeNull();
+    expect(useLab.getState().canRedo).toBe(false);
+  });
+
+  it("does not dispose an applied duplicate when its history entry is cleared", () => {
+    const root = new Group();
+    const bone = new Bone();
+    const skinned = new SkinnedMesh(new BoxGeometry(), new MeshBasicMaterial());
+    skinned.bind(new Skeleton([bone]));
+    root.add(bone, skinned);
+    useLab.getState().addModel({
+      id: "duplicate-applied-rig",
+      fileName: "rig.glb",
+      format: "glb",
+      fileSize: 1,
+      root,
+    });
+    const copy = useLab.getState().duplicateSelected() as Group;
+    const copyMesh = copy.children.find(
+      (child) => (child as SkinnedMesh).isSkinnedMesh,
+    ) as SkinnedMesh;
+    const skeletonDispose = vi.spyOn(copyMesh.skeleton, "dispose");
+
+    useLab.getState().invalidateHistory();
+    expect(copy.parent).toBe(useLab.getState().sceneRoot);
+    expect(skeletonDispose).not.toHaveBeenCalled();
+
+    useLab.getState().removeModel(useLab.getState().models.at(-1)!.id);
+    expect(skeletonDispose).toHaveBeenCalledOnce();
   });
 
   it("duplicates group descendants and gives every cloned object a new UUID", () => {

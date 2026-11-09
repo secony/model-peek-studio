@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
-import { MousePointerClick } from "lucide-react";
+import { Box, Globe, MousePointerClick } from "lucide-react";
 import { MathUtils, type Object3D } from "three";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { getModelOwnerId, useLab } from "../lib/store";
+import type { CoordinateSpace } from "../lib/store";
 import { countStats, formatBytes, formatNumber, getSize } from "../lib/scene-utils";
+import { getObjectTransform } from "../lib/transform/math";
 
 type Vec = "position" | "rotation" | "scale";
 const AXES = ["x", "y", "z"] as const;
@@ -13,20 +16,40 @@ function NumberField({
   value,
   onCommit,
   axis,
+  allowZero = true,
 }: {
   value: number;
   onCommit: (v: number) => void;
   axis: (typeof AXES)[number];
+  allowZero?: boolean;
 }) {
   const [text, setText] = useState(formatNumber(value, 3));
   useEffect(() => setText(formatNumber(value, 3)), [value]);
+
   const commit = () => {
     const v = parseFloat(text.replace(",", "."));
     if (Number.isFinite(v)) {
+      if (!allowZero && Math.abs(v) < 1e-4) {
+        setText(formatNumber(value, 3));
+        return;
+      }
       onCommit(v);
       setText(formatNumber(v, 3));
-    } else setText(formatNumber(value, 3));
+    } else {
+      setText(formatNumber(value, 3));
+    }
   };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      commit();
+      (e.target as HTMLInputElement).blur();
+    } else if (e.key === "Escape") {
+      setText(formatNumber(value, 3));
+      (e.target as HTMLInputElement).blur();
+    }
+  };
+
   return (
     <div className="relative">
       <span
@@ -39,40 +62,80 @@ function NumberField({
         value={text}
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}
-        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+        onKeyDown={handleKeyDown}
       />
     </div>
   );
 }
 
-function VectorRow({ obj, prop, label }: { obj: Object3D; prop: Vec; label: string }) {
+function VectorRow({
+  obj,
+  prop,
+  label,
+  space,
+}: {
+  obj: Object3D;
+  prop: Vec;
+  label: string;
+  space: CoordinateSpace;
+}) {
   const setObjectTransform = useLab((s) => s.setObjectTransform);
   const isRot = prop === "rotation";
+  const isScale = prop === "scale";
+  const transform = getObjectTransform(obj, space);
+
   return (
     <div className="space-y-1.5">
       <p className="text-[11px] text-muted-foreground">{label}</p>
       <div className="grid grid-cols-3 gap-1.5">
-        {AXES.map((a) => (
-          <NumberField
-            key={a}
-            axis={a}
-            value={isRot ? MathUtils.radToDeg(obj.rotation[a]) : obj[prop][a]}
-            onCommit={(v) => {
-              setObjectTransform(obj, prop, a, isRot ? MathUtils.degToRad(v) : v);
-            }}
-          />
-        ))}
+        {AXES.map((a) => {
+          const val =
+            prop === "position"
+              ? transform.position[a]
+              : isRot
+                ? transform.rotationDegrees[a]
+                : transform.scale[a];
+
+          return (
+            <NumberField
+              key={a}
+              axis={a}
+              value={val}
+              allowZero={!isScale}
+              onCommit={(v) => {
+                setObjectTransform(
+                  obj,
+                  prop,
+                  a,
+                  isRot ? MathUtils.degToRad(v) : v,
+                  space,
+                );
+              }}
+            />
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section className="space-y-3 border-b border-border p-3">
-      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-        {title}
-      </h3>
+      <div className="flex items-center justify-between">
+        <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          {title}
+        </h3>
+        {action}
+      </div>
       {children}
     </section>
   );
@@ -83,6 +146,8 @@ export function PropertiesPanel() {
   const renameObject = useLab((s) => s.renameObject);
   const models = useLab((s) => s.models);
   const revision = useLab((s) => s.revision);
+  const coordinateSpace = useLab((s) => s.coordinateSpace);
+  const setCoordinateSpace = useLab((s) => s.setCoordinateSpace);
 
   if (!selected)
     return (
@@ -120,11 +185,49 @@ export function PropertiesPanel() {
         />
         <p className="font-mono text-[11px] text-muted-foreground">{selected.type}</p>
       </Section>
-      <Section title="Transformação">
-        <VectorRow obj={selected} prop="position" label="Posição" />
-        <VectorRow obj={selected} prop="rotation" label="Rotação (graus)" />
-        <VectorRow obj={selected} prop="scale" label="Escala" />
+
+      <Section
+        title="Transformação"
+        action={
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-1.5 text-[10px] font-mono text-muted-foreground hover:text-foreground"
+            onClick={() => setCoordinateSpace(coordinateSpace === "local" ? "world" : "local")}
+            title={`Alternar para coordenadas ${coordinateSpace === "local" ? "Globais" : "Locais"}`}
+          >
+            {coordinateSpace === "local" ? (
+              <Box className="mr-1 size-3" />
+            ) : (
+              <Globe className="mr-1 size-3 text-primary" />
+            )}
+            {coordinateSpace === "local" ? "Local" : "Global"}
+          </Button>
+        }
+      >
+        <VectorRow
+          key={`pos-${selected.uuid}-${revision}-${coordinateSpace}`}
+          obj={selected}
+          prop="position"
+          label={coordinateSpace === "world" ? "Posição (Global)" : "Posição"}
+          space={coordinateSpace}
+        />
+        <VectorRow
+          key={`rot-${selected.uuid}-${revision}-${coordinateSpace}`}
+          obj={selected}
+          prop="rotation"
+          label={coordinateSpace === "world" ? "Rotação (graus, Global)" : "Rotação (graus)"}
+          space={coordinateSpace}
+        />
+        <VectorRow
+          key={`scl-${selected.uuid}-${revision}-${coordinateSpace}`}
+          obj={selected}
+          prop="scale"
+          label={coordinateSpace === "world" ? "Escala (Global)" : "Escala"}
+          space={coordinateSpace}
+        />
       </Section>
+
       <Section title="Dimensões (bounding box)">
         {size ? (
           <dl className="grid grid-cols-3 gap-1.5 font-mono text-xs">

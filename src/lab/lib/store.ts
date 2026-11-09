@@ -12,6 +12,24 @@ import {
   transformSnapshotWithProperty,
   type ObjectTransformSnapshot,
 } from "./history/transform-snapshot";
+import type {
+  CoordinateSpace,
+  SnappingConfig,
+  TransformAxis,
+  TransformMode,
+  TransformProperty,
+} from "./transform/types";
+import { DEFAULT_SNAPPING_CONFIG } from "./transform/snapping";
+import { TransformEngine } from "./transform/TransformEngine";
+import { applyAxisTransform } from "./transform/math";
+
+export type {
+  CoordinateSpace,
+  SnappingConfig,
+  TransformAxis,
+  TransformMode,
+  TransformProperty,
+};
 
 export interface LoadedModel {
   id: string;
@@ -42,9 +60,6 @@ interface GroupOrigin {
   parentUuid: string;
   index: number;
 }
-
-type TransformProperty = "position" | "rotation" | "scale";
-type TransformAxis = "x" | "y" | "z";
 
 interface ActiveTransformManipulation {
   id: number;
@@ -105,6 +120,76 @@ function findOwnedRoots(sceneRoot: Group, modelId: string) {
   return roots;
 }
 
+function insertChildAt(parent: Object3D, child: Object3D, index: number) {
+  if (child.parent) child.removeFromParent();
+  parent.add(child);
+  const appendedIndex = parent.children.indexOf(child);
+  parent.children.splice(appendedIndex, 1);
+  parent.children.splice(Math.max(0, Math.min(index, parent.children.length)), 0, child);
+}
+
+function insertModelAt(models: LoadedModel[], model: LoadedModel, index: number) {
+  const next = models.filter((candidate) => candidate.id !== model.id);
+  next.splice(Math.max(0, Math.min(index, next.length)), 0, model);
+  return next;
+}
+
+function removeModelRecord(models: LoadedModel[], model: LoadedModel) {
+  return models.filter((candidate) => candidate.id !== model.id);
+}
+
+function removeFromSelection(
+  removedRoot: Object3D,
+  previousSelection: SelectionSnapshot,
+  sceneRoot: Group,
+  get: () => LabState,
+  set: LabStoreSetter,
+) {
+  const current = get();
+  const currentSelectedWasRemoved =
+    current.selected !== null && containsObject(removedRoot, current.selected);
+  const isRestorable = (object: Object3D) =>
+    containsObject(sceneRoot, object) && isEffectivelyVisible(object);
+  let selectedObjects = current.selectedObjects.filter(
+    (object) => !containsObject(removedRoot, object) && isRestorable(object),
+  );
+  let selected =
+    current.selected &&
+    !containsObject(removedRoot, current.selected) &&
+    isRestorable(current.selected)
+      ? current.selected
+      : null;
+
+  if (currentSelectedWasRemoved) {
+    selectedObjects = previousSelection.selectedObjects.filter(isRestorable);
+    selected =
+      previousSelection.selected && isRestorable(previousSelection.selected)
+        ? previousSelection.selected
+        : (selectedObjects.at(-1) ?? null);
+  } else if (!selected) {
+    selected = selectedObjects.at(-1) ?? null;
+  }
+  set({ selected, selectedObjects });
+}
+
+const retainedHistoryRoots = new Map<Object3D, number>();
+
+function retainHistoryRoot(root: Object3D) {
+  retainedHistoryRoots.set(root, (retainedHistoryRoots.get(root) ?? 0) + 1);
+}
+
+function releaseHistoryRoot(root: Object3D, sceneRoot: Group) {
+  const retainCount = retainedHistoryRoots.get(root) ?? 0;
+  if (retainCount > 1) {
+    retainedHistoryRoots.set(root, retainCount - 1);
+    return;
+  }
+  retainedHistoryRoots.delete(root);
+  // An applied command no longer owns the live scene resource lifecycle.
+  if (containsObject(sceneRoot, root)) return;
+  disposeObjects([root], [sceneRoot, ...retainedHistoryRoots.keys()]);
+}
+
 function findObjectByUuid(root: Object3D, uuid: string): Object3D | null {
   let match: Object3D | null = null;
   root.traverse((object) => {
@@ -152,6 +237,21 @@ function remapClonedGroupOrigins(source: Object3D, clone: Object3D) {
   });
 }
 
+interface HierarchySnapshot {
+  object: Object3D;
+  parent: Object3D;
+  index: number;
+  depth: number;
+}
+
+function sceneDepth(object: Object3D, sceneRoot: Group) {
+  let depth = 0;
+  for (let current: Object3D | null = object; current && current !== sceneRoot; current = current.parent) {
+    depth += 1;
+  }
+  return depth;
+}
+
 function pruneEmptyOrganizationGroups(start: Object3D | null, sceneRoot: Group) {
   const removed: Group[] = [];
   let current = start;
@@ -162,11 +262,89 @@ function pruneEmptyOrganizationGroups(start: Object3D | null, sceneRoot: Group) 
     current.children.length === 0
   ) {
     const parent = current.parent;
+    if (!parent) break;
     current.removeFromParent();
     removed.push(current);
     current = parent;
   }
   return removed;
+}
+
+function removeSceneObjects(
+  requested: Object3D[],
+  explicitModelIds: Set<string>,
+  get: () => LabState,
+  set: LabStoreSetter,
+) {
+  const state = get();
+  const { sceneRoot } = state;
+  if (state.isManipulating) return false;
+
+  const candidates: Object3D[] = [];
+  const modelIds = new Set(explicitModelIds);
+  for (const requestedObject of requested) {
+    if (
+      requestedObject === sceneRoot ||
+      !containsObject(sceneRoot, requestedObject) ||
+      candidates.includes(requestedObject)
+    ) {
+      continue;
+    }
+
+    const directModel = state.models.find((model) => model.root === requestedObject);
+    if (directModel) {
+      modelIds.add(directModel.id);
+      candidates.push(...findOwnedRoots(sceneRoot, directModel.id));
+      continue;
+    }
+
+    candidates.push(requestedObject);
+    const containedModels = state.models.filter((model) => containsObject(requestedObject, model.root));
+    containedModels.forEach((model) => modelIds.add(model.id));
+    if (isOrganizationGroup(requestedObject)) {
+      containedModels.forEach((model) => {
+        findOwnedRoots(sceneRoot, model.id)
+          .filter((root) => !containsObject(requestedObject, root))
+          .forEach((root) => candidates.push(root));
+      });
+    }
+  }
+
+  const roots = [...new Set(candidates)].filter(
+    (candidate) =>
+      !candidates.some((other) => other !== candidate && containsObject(other, candidate)),
+  );
+  if (roots.length === 0) return false;
+
+  get().invalidateHistory();
+  const parents = roots.map((root) => root.parent);
+  roots.forEach((root) => root.removeFromParent());
+  disposeObjects(roots, [sceneRoot, ...retainedHistoryRoots.keys()]);
+  const prunedGroups: Group[] = [];
+  parents.forEach((parent) => {
+    prunedGroups.push(...pruneEmptyOrganizationGroups(parent, sceneRoot));
+  });
+  disposeObjects(prunedGroups, [sceneRoot, ...retainedHistoryRoots.keys()]);
+
+  const removedRoots = new Set([...roots, ...prunedGroups]);
+  const current = get();
+  const selectedObjects = current.selectedObjects.filter(
+    (object) => ![...removedRoots].some((root) => containsObject(root, object)),
+  );
+  const selected =
+    current.selected && ![...removedRoots].some((root) => containsObject(root, current.selected))
+      ? current.selected
+      : (selectedObjects.at(-1) ?? null);
+
+  set((latest) => ({
+    models: latest.models.filter(
+      (model) => !modelIds.has(model.id) && !roots.some((root) => containsObject(root, model.root)),
+    ),
+    selected,
+    selectedObjects,
+    revision: latest.revision + 1,
+  }));
+  return true;
 }
 
 function commonSceneParent(objects: Object3D[], sceneRoot: Group) {
@@ -232,9 +410,18 @@ interface LabState {
   isManipulating: boolean;
   undoLabel: string | null;
   redoLabel: string | null;
+  transformMode: TransformMode;
+  coordinateSpace: CoordinateSpace;
+  snappingEnabled: boolean;
+  snappingConfig: SnappingConfig;
+  setTransformMode: (mode: TransformMode) => void;
+  setCoordinateSpace: (space: CoordinateSpace) => void;
+  toggleSnapping: () => void;
+  setSnappingConfig: (config: Partial<SnappingConfig>) => void;
   addModel: (m: LoadedModel) => void;
   removeModel: (id: string) => void;
   removeObject: (object: Object3D) => void;
+  removeObjects: (objects: Object3D[]) => void;
   duplicateSelected: () => Object3D | null;
   toggleObjectVisibility: (object: Object3D) => boolean;
   toggleSelection: (object: Object3D) => void;
@@ -247,6 +434,7 @@ interface LabState {
     property: TransformProperty,
     axis: TransformAxis,
     value: number,
+    space?: CoordinateSpace,
   ) => boolean;
   undo: () => boolean;
   redo: () => boolean;
@@ -306,13 +494,19 @@ function publishHistoryState(
 
 function executeHistoryCommand(set: LabStoreSetter, command: HistoryCommand) {
   if (activeTransformManipulation) return false;
+  const previousState = history.state;
   let executed = false;
   try {
     history.execute(command);
     executed = true;
     return true;
   } finally {
-    publishHistoryState(set, executed);
+    const currentState = history.state;
+    const changed =
+      executed ||
+      currentState.cursor !== previousState.cursor ||
+      currentState.entryCount !== previousState.entryCount;
+    publishHistoryState(set, changed);
   }
 }
 
@@ -391,6 +585,15 @@ export const useLab = create<LabState>((set, get) => ({
   isManipulating: false,
   undoLabel: history.undoLabel,
   redoLabel: history.redoLabel,
+  transformMode: "translate",
+  coordinateSpace: "local",
+  snappingEnabled: false,
+  snappingConfig: { ...DEFAULT_SNAPPING_CONFIG },
+  setTransformMode: (mode) => set({ transformMode: mode }),
+  setCoordinateSpace: (space) => set({ coordinateSpace: space }),
+  toggleSnapping: () => set((s) => ({ snappingEnabled: !s.snappingEnabled })),
+  setSnappingConfig: (config) =>
+    set((s) => ({ snappingConfig: { ...s.snappingConfig, ...config } })),
   addModel: (m) => {
     get().invalidateHistory();
     const { sceneRoot } = get();
@@ -405,88 +608,13 @@ export const useLab = create<LabState>((set, get) => ({
   },
   removeModel: (id) => {
     const state = get();
-    if (state.isManipulating) return;
-    const m = state.models.find((x) => x.id === id);
-    if (!m) return;
-    get().invalidateHistory();
+    const model = state.models.find((candidate) => candidate.id === id);
+    if (!model) return;
     const roots = findOwnedRoots(state.sceneRoot, id);
-    if (!roots.length) roots.push(m.root);
-    const oldParents = roots.map((root) => root.parent);
-    roots.forEach((root) => root.removeFromParent());
-    const prunedGroups = oldParents.flatMap((parent) =>
-      pruneEmptyOrganizationGroups(parent, state.sceneRoot),
-    );
-    const retainedRoots = [...state.sceneRoot.children];
-    disposeObjects(roots, retainedRoots);
-    set((current) => {
-      const prunedSet = new Set<Object3D>(prunedGroups);
-      const selectedObjects = current.selectedObjects.filter(
-        (object) => !roots.some((root) => containsObject(root, object)) && !prunedSet.has(object),
-      );
-      return {
-        models: current.models.filter((model) => model.id !== id),
-        selectedObjects,
-        selected:
-          current.selected &&
-          (roots.some((root) => containsObject(root, current.selected)) ||
-            prunedSet.has(current.selected))
-            ? (selectedObjects[0] ?? null)
-            : current.selected,
-      };
-    });
+    removeSceneObjects(roots.length ? roots : [model.root], new Set([id]), get, set);
   },
-  removeObject: (object) => {
-    const state = get();
-    if (
-      state.isManipulating ||
-      object === state.sceneRoot ||
-      !containsObject(state.sceneRoot, object)
-    )
-      return;
-    const directModel = state.models.find((model) => model.root === object);
-    if (directModel) {
-      get().removeModel(directModel.id);
-      return;
-    }
-
-    get().invalidateHistory();
-
-    const containedModels = state.models.filter((model) => containsObject(object, model.root));
-    const roots = [object];
-    if (isOrganizationGroup(object) && containedModels.length > 0) {
-      const nestedOwnedRoots = containedModels.flatMap((model) =>
-        findOwnedRoots(state.sceneRoot, model.id).filter((root) => !containsObject(object, root)),
-      );
-      roots.push(...nestedOwnedRoots);
-    }
-    const oldParents = roots.map((root) => root.parent);
-    roots.forEach((root) => root.removeFromParent());
-    const prunedGroups = oldParents.flatMap((parent) =>
-      pruneEmptyOrganizationGroups(parent, state.sceneRoot),
-    );
-    const retainedRoots = [...state.sceneRoot.children];
-    disposeObjects(roots, retainedRoots);
-    const prunedSet = new Set<Object3D>(prunedGroups);
-    set((current) => {
-      const selectedObjects = current.selectedObjects.filter(
-        (candidate) =>
-          !roots.some((root) => containsObject(root, candidate)) && !prunedSet.has(candidate),
-      );
-      return {
-        models: current.models.filter(
-          (model) => !containedModels.some((removedModel) => removedModel.id === model.id),
-        ),
-        selectedObjects,
-        selected:
-          current.selected &&
-          (roots.some((root) => containsObject(root, current.selected)) ||
-            prunedSet.has(current.selected))
-            ? (selectedObjects[0] ?? null)
-            : current.selected,
-        revision: current.revision + 1,
-      };
-    });
-  },
+  removeObject: (object) => removeSceneObjects([object], new Set(), get, set),
+  removeObjects: (objects) => removeSceneObjects(objects, new Set(), get, set),
   duplicateSelected: () => {
     const state = get();
     if (state.isManipulating) return null;
@@ -511,7 +639,11 @@ export const useLab = create<LabState>((set, get) => ({
 
     const copy = skinnedMeshes.length > 0 ? cloneSkinned(selected) : selected.clone(true);
     copy.position.x += 0.25;
-    get().invalidateHistory();
+    const duplicateParent = parent ?? state.sceneRoot;
+    const parentIndex = duplicateParent.children.length;
+    const previousSelection = selectionSnapshot(get);
+    let duplicateModel: LoadedModel | null = null;
+    const modelIndex = state.models.length;
 
     if (sourceModel) {
       let id: string;
@@ -520,32 +652,54 @@ export const useLab = create<LabState>((set, get) => ({
       } while (state.models.some((model) => model.id === id));
       remapClonedGroupOrigins(selected, copy);
       markModelOwner(copy, id);
-      (parent ?? state.sceneRoot).add(copy);
-      set((current) => ({
-        models: [
-          ...current.models,
-          {
-            ...sourceModel,
-            id,
-            fileName: `Cópia de ${sourceModel.fileName}`,
-            root: copy,
-          },
-        ],
-        selected: copy,
-        selectedObjects: [copy],
-        revision: current.revision + 1,
-      }));
-      return copy;
+      duplicateModel = {
+        ...sourceModel,
+        id,
+        fileName: `Cópia de ${sourceModel.fileName}`,
+        root: copy,
+      };
     }
 
-    if (!parent) return null;
-    parent.add(copy);
-    set((current) => ({
-      selected: copy,
-      selectedObjects: [copy],
-      revision: current.revision + 1,
-    }));
-    return copy;
+    const modelRecord = duplicateModel;
+    let applied = false;
+    const command: HistoryCommand = {
+      label: `Duplicar ${selected.name || selected.type}`,
+      redo: () => {
+        insertChildAt(duplicateParent, copy, parentIndex);
+        if (modelRecord) {
+          set((current) => ({ models: insertModelAt(current.models, modelRecord, modelIndex) }));
+        }
+        set({ selected: copy, selectedObjects: [copy] });
+        applied = true;
+      },
+      undo: () => {
+        copy.removeFromParent();
+        if (modelRecord) {
+          set((current) => ({ models: removeModelRecord(current.models, modelRecord) }));
+        }
+        removeFromSelection(copy, previousSelection, state.sceneRoot, get, set);
+        applied = false;
+      },
+      dispose: () => releaseHistoryRoot(copy, state.sceneRoot),
+    };
+
+    try {
+      const executed = executeHistoryCommand(set, command);
+      if (!executed) {
+        disposeObjects([copy], [state.sceneRoot]);
+        return null;
+      }
+      retainHistoryRoot(copy);
+      return copy;
+    } catch (error) {
+      if (!applied) {
+        disposeObjects([copy], [state.sceneRoot]);
+        throw error;
+      }
+      retainHistoryRoot(copy);
+      console.error("A duplicação foi aplicada, mas a limpeza do histórico falhou.", error);
+      return copy;
+    }
   },
   toggleObjectVisibility: (object) => {
     const state = get();
@@ -735,7 +889,8 @@ export const useLab = create<LabState>((set, get) => ({
       dispose: () => {},
     });
   },
-  setObjectTransform: (object, property, axis, value) => {
+  setObjectTransform: (object, property, axis, value, space) => {
+    const targetSpace = space ?? get().coordinateSpace;
     if (
       !containsObject(get().sceneRoot, object) ||
       get().selected !== object ||
@@ -745,13 +900,26 @@ export const useLab = create<LabState>((set, get) => ({
       return false;
     }
     const before = captureTransformSnapshot(object);
-    const axisIndex = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-    const after = transformSnapshotWithProperty(before, property, axisIndex, value);
+    let after: ObjectTransformSnapshot;
+    if (targetSpace === "local") {
+      const axisIndex = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+      after = transformSnapshotWithProperty(before, property, axisIndex, value);
+    } else {
+      const success = applyAxisTransform(object, property, axis, value, "world");
+      if (!success) {
+        applyTransformSnapshot(object, before);
+        return false;
+      }
+      after = captureTransformSnapshot(object);
+      applyTransformSnapshot(object, before);
+    }
+
     if (sameTransformSnapshot(before, after)) return false;
     const propertyLabel =
       property === "position" ? "posição" : property === "rotation" ? "rotação" : "escala";
+    const spaceLabel = targetSpace === "world" ? " (Global)" : "";
     return executeHistoryCommand(set, {
-      label: `Alterar ${propertyLabel} ${axis.toUpperCase()}`,
+      label: `Alterar ${propertyLabel} ${axis.toUpperCase()}${spaceLabel}`,
       redo: () => applyTransformSnapshot(object, after),
       undo: () => applyTransformSnapshot(object, before),
       dispose: () => {},
@@ -816,9 +984,8 @@ export const useLab = create<LabState>((set, get) => ({
       publishHistoryState(set, changed, false);
     }
   },
-  // Barriers for non-reversible structural edits: import/add, remove, duplicate,
-  // group/ungroup and clear. History commands currently retain Object3D refs only
-  // and their dispose() methods do not dispose scene resources.
+  // Non-reversible structural barriers: direct addModel, group/ungroup and clear.
+  // Import, duplicate, and removal now retain resource roots through history commands.
   invalidateHistory: () => {
     const active = activeTransformManipulation;
     let restoredTransform = false;
@@ -877,8 +1044,54 @@ export const useLab = create<LabState>((set, get) => ({
     ) {
       return false;
     }
-    get().addModel(model);
-    return true;
+
+    const activeManipulation = activeTransformManipulation;
+    if (activeManipulation) get().cancelTransformManipulation(activeManipulation.id);
+    const { sceneRoot, models } = get();
+    const sceneIndex = sceneRoot.children.length;
+    const modelIndex = models.length;
+    const previousSelection = selectionSnapshot(get);
+    markModelOwner(model.root, model.id);
+    let applied = false;
+    const command: HistoryCommand = {
+      label: `Importar ${model.fileName}`,
+      redo: () => {
+        insertChildAt(sceneRoot, model.root, sceneIndex);
+        set((current) => ({
+          models: insertModelAt(current.models, model, modelIndex),
+          selected: model.root,
+          selectedObjects: [model.root],
+          fitToken: current.fitToken + 1,
+        }));
+        applied = true;
+      },
+      undo: () => {
+        model.root.removeFromParent();
+        set((current) => ({ models: removeModelRecord(current.models, model) }));
+        removeFromSelection(model.root, previousSelection, sceneRoot, get, set);
+        set((current) => ({ fitToken: current.fitToken + 1 }));
+        applied = false;
+      },
+      dispose: () => releaseHistoryRoot(model.root, sceneRoot),
+    };
+
+    try {
+      const added = executeHistoryCommand(set, command);
+      if (!added) {
+        disposeObjects([model.root], [sceneRoot]);
+        return false;
+      }
+      retainHistoryRoot(model.root);
+      return true;
+    } catch (error) {
+      if (!applied) {
+        disposeObjects([model.root], [sceneRoot]);
+        throw error;
+      }
+      retainHistoryRoot(model.root);
+      console.error("A importação foi aplicada, mas a limpeza do histórico falhou.", error);
+      return true;
+    }
   },
   finishImport: (id) =>
     set((s) => {

@@ -9,12 +9,30 @@ import {
   PerspectiveCamera,
   TransformControls,
 } from "@react-three/drei";
-import { Copy, Hand, Move3D, Rotate3D, Scaling } from "lucide-react";
+import {
+  Box,
+  ChevronDown,
+  Copy,
+  Globe,
+  Hand,
+  Magnet,
+  Move3D,
+  Rotate3D,
+  Scaling,
+  SlidersHorizontal,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { toast } from "sonner";
 import {
   BoxHelper,
   Color,
+  MathUtils,
   OrthographicCamera as OrthoCam,
   PerspectiveCamera as PerspCam,
   Vector2,
@@ -22,7 +40,13 @@ import {
 } from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { useLab } from "../lib/store";
-import type { TransformManipulationId } from "../lib/store";
+import type { CoordinateSpace, TransformManipulationId, TransformMode } from "../lib/store";
+import {
+  ROTATION_SNAP_PRESETS,
+  SCALE_SNAP_PRESETS,
+  TRANSLATION_SNAP_PRESETS,
+} from "../lib/transform/snapping";
+import { globalPerformanceMonitor } from "../lib/diagnostics/PerformanceMonitor";
 import {
   cancelFreeDragSession,
   canStartFreeDrag,
@@ -242,16 +266,34 @@ function SelectionHighlight() {
   return null;
 }
 
+function PerformanceTracker() {
+  const gl = useThree((s) => s.gl);
+  useFrame(() => {
+    globalPerformanceMonitor.recordFrame(gl);
+  });
+  return null;
+}
+
 export function SelectionTransform({
-  mode,
+  mode: propMode,
+  space: propSpace,
   transformDraggingRef,
   orbitControlsRef,
 }: {
-  mode: TransformMode;
+  mode?: TransformMode;
+  space?: CoordinateSpace;
   transformDraggingRef: MutableRefObject<boolean>;
   orbitControlsRef?: MutableRefObject<OrbitControlToggle | null>;
 }) {
   const selected = useLab((s) => s.selected);
+  const storeMode = useLab((s) => s.transformMode);
+  const storeSpace = useLab((s) => s.coordinateSpace);
+  const snappingEnabled = useLab((s) => s.snappingEnabled);
+  const snappingConfig = useLab((s) => s.snappingConfig);
+
+  const mode = propMode ?? storeMode;
+  const currentSpace = propSpace ?? storeSpace;
+
   const beginTransformManipulation = useLab((s) => s.beginTransformManipulation);
   const commitTransformManipulation = useLab((s) => s.commitTransformManipulation);
   const cancelTransformManipulation = useLab((s) => s.cancelTransformManipulation);
@@ -308,10 +350,18 @@ export function SelectionTransform({
 
   if (!selected || !isEffectivelyVisible(selected)) return null;
 
+  const translationSnap = snappingEnabled ? snappingConfig.translation : null;
+  const rotationSnap = snappingEnabled ? MathUtils.degToRad(snappingConfig.rotation) : null;
+  const scaleSnap = snappingEnabled ? snappingConfig.scale : null;
+
   return (
     <TransformControls
       object={selected}
       mode={mode}
+      space={currentSpace}
+      translationSnap={translationSnap}
+      rotationSnap={rotationSnap}
+      scaleSnap={scaleSnap}
       onMouseDown={() => {
         if (manipulationIdRef.current !== null) return;
         const id = beginTransformManipulation(selected);
@@ -331,16 +381,29 @@ export function SelectionTransform({
 }
 
 export function TransformToolbar({
-  mode,
-  onModeChange,
+  mode: propMode,
+  onModeChange: propOnModeChange,
   freeMoveEnabled,
   onToggleFreeMove,
 }: {
-  mode: TransformMode;
-  onModeChange: (mode: TransformMode) => void;
+  mode?: TransformMode;
+  onModeChange?: (mode: TransformMode) => void;
   freeMoveEnabled: boolean;
   onToggleFreeMove: () => void;
 }) {
+  const storeMode = useLab((s) => s.transformMode);
+  const setTransformMode = useLab((s) => s.setTransformMode);
+  const mode = propMode ?? storeMode;
+  const onModeChange = propOnModeChange ?? setTransformMode;
+
+  const coordinateSpace = useLab((s) => s.coordinateSpace);
+  const setCoordinateSpace = useLab((s) => s.setCoordinateSpace);
+
+  const snappingEnabled = useLab((s) => s.snappingEnabled);
+  const toggleSnapping = useLab((s) => s.toggleSnapping);
+  const snappingConfig = useLab((s) => s.snappingConfig);
+  const setSnappingConfig = useLab((s) => s.setSnappingConfig);
+
   const hasSelection = useLab((s) => s.selected !== null);
   const duplicateSelected = useLab((s) => s.duplicateSelected);
 
@@ -371,7 +434,133 @@ export function TransformToolbar({
             <span className="hidden sm:inline">{label}</span>
           </Button>
         ))}
+
         <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-border" />
+
+        {/* Coordinate Space (Local vs Global) */}
+        <Button
+          aria-label={coordinateSpace === "local" ? "Espaço: Local" : "Espaço: Global"}
+          aria-pressed={coordinateSpace === "world"}
+          className={
+            coordinateSpace === "world"
+              ? "h-8 border border-primary/30 bg-primary/15 px-2 text-primary hover:bg-primary/20"
+              : "h-8 px-2 text-muted-foreground"
+          }
+          disabled={!hasSelection}
+          onClick={() => setCoordinateSpace(coordinateSpace === "local" ? "world" : "local")}
+          size="sm"
+          title={`Espaço de coordenadas: ${coordinateSpace === "local" ? "Local" : "Global (World)"}`}
+          variant={coordinateSpace === "world" ? "secondary" : "ghost"}
+        >
+          {coordinateSpace === "local" ? (
+            <Box className="size-4" aria-hidden="true" />
+          ) : (
+            <Globe className="size-4" aria-hidden="true" />
+          )}
+          <span className="hidden sm:inline">{coordinateSpace === "local" ? "Local" : "Global"}</span>
+        </Button>
+
+        {/* Snapping Toggle & Configuration Popover */}
+        <div className="flex items-center">
+          <Button
+            aria-label="Snapping"
+            aria-pressed={snappingEnabled}
+            className={
+              snappingEnabled
+                ? "h-8 rounded-r-none border border-primary/30 bg-primary/15 px-2 text-primary hover:bg-primary/20"
+                : "h-8 rounded-r-none px-2 text-muted-foreground"
+            }
+            disabled={!hasSelection}
+            onClick={toggleSnapping}
+            size="sm"
+            title={snappingEnabled ? "Desativar snapping" : "Ativar snapping"}
+            variant={snappingEnabled ? "secondary" : "ghost"}
+          >
+            <Magnet className="size-4" aria-hidden="true" />
+            <span className="hidden sm:inline">Snap</span>
+          </Button>
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                aria-label="Configurar snapping"
+                className="h-8 rounded-l-none border-l border-border px-1 text-muted-foreground"
+                disabled={!hasSelection}
+                size="sm"
+                title="Configurações de Snapping"
+                variant="ghost"
+              >
+                <ChevronDown className="size-3" aria-hidden="true" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-64 space-y-3 p-3 text-xs" align="center">
+              <div className="font-semibold text-foreground">Configurações de Snapping</div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Translação (unidades)</span>
+                  <span className="font-mono">{snappingConfig.translation}</span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {TRANSLATION_SNAP_PRESETS.map((val) => (
+                    <Button
+                      key={val}
+                      size="sm"
+                      variant={snappingConfig.translation === val ? "secondary" : "outline"}
+                      className="h-6 px-1.5 text-[11px]"
+                      onClick={() => setSnappingConfig({ translation: val })}
+                    >
+                      {val}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Rotação (graus)</span>
+                  <span className="font-mono">{snappingConfig.rotation}°</span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {ROTATION_SNAP_PRESETS.map((deg) => (
+                    <Button
+                      key={deg}
+                      size="sm"
+                      variant={snappingConfig.rotation === deg ? "secondary" : "outline"}
+                      className="h-6 px-1.5 text-[11px]"
+                      onClick={() => setSnappingConfig({ rotation: deg })}
+                    >
+                      {deg}°
+                    </Button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Escala</span>
+                  <span className="font-mono">{snappingConfig.scale}</span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {SCALE_SNAP_PRESETS.map((scl) => (
+                    <Button
+                      key={scl}
+                      size="sm"
+                      variant={snappingConfig.scale === scl ? "secondary" : "outline"}
+                      className="h-6 px-1.5 text-[11px]"
+                      onClick={() => setSnappingConfig({ scale: scl })}
+                    >
+                      {scl}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
+
+        <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-border" />
+
         <Button
           aria-label="Duplicar objeto selecionado"
           className="h-8 px-2.5 text-muted-foreground"
@@ -450,7 +639,8 @@ function CameraRig() {
 export function Viewport() {
   const { showGrid, showAxes, projection } = useLab();
   const select = useLab((s) => s.select);
-  const [transformMode, setTransformMode] = useState<TransformMode>("translate");
+  const transformMode = useLab((s) => s.transformMode);
+  const setTransformMode = useLab((s) => s.setTransformMode);
   const [freeMoveEnabled, setFreeMoveEnabled] = useState(false);
   const transformDraggingRef = useRef(false);
   const suppressClickPointerRef = useRef<number | null>(null);
@@ -507,6 +697,7 @@ export function Viewport() {
           orbitControlsRef={orbitControlsRef}
         />
         <SelectionHighlight />
+        <PerformanceTracker />
         <SelectionTransform
           mode={transformMode}
           transformDraggingRef={transformDraggingRef}
